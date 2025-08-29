@@ -1,8 +1,8 @@
 # Main configuration for compilation Lambda module
 
-# SQS FIFO Queue for compilation requests
-resource "aws_sqs_queue" "compilation_queue" {
-  name                        = "${var.environment}-compilation-queue.fifo"
+# Color-specific SQS FIFO Queues for blue-green deployments
+resource "aws_sqs_queue" "compilation_queue_blue" {
+  name                        = "${var.environment}-compilation-queue-blue.fifo"
   fifo_queue                  = true
   content_based_deduplication = false
   message_retention_seconds   = var.sqs_message_retention_seconds
@@ -11,6 +11,21 @@ resource "aws_sqs_queue" "compilation_queue" {
   tags = merge({
     Environment = var.environment
     Purpose     = "compilation-requests"
+    Color       = "blue"
+  }, var.tags)
+}
+
+resource "aws_sqs_queue" "compilation_queue_green" {
+  name                        = "${var.environment}-compilation-queue-green.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = false
+  message_retention_seconds   = var.sqs_message_retention_seconds
+  visibility_timeout_seconds  = var.sqs_visibility_timeout_seconds
+
+  tags = merge({
+    Environment = var.environment
+    Purpose     = "compilation-requests"
+    Color       = "green"
   }, var.tags)
 }
 
@@ -45,21 +60,29 @@ resource "aws_lambda_function" "compilation" {
   source_code_hash  = chomp(data.aws_s3_object.compilation_lambda_zip_sha.body)
   function_name     = "compilation-${var.environment}"
   role              = var.iam_role_arn
-  handler           = "lambda_function.lambda_handler"
+  handler           = "index.handler"
   timeout           = var.lambda_timeout
 
-  runtime = "python3.12"
+  runtime = "nodejs22.x"
+
+  architectures = ["arm64"]
 
   environment {
     variables = {
-      SQS_QUEUE_URL   = aws_sqs_queue.compilation_queue.id
-      WEBSOCKET_URL   = var.websocket_url
-      RETRY_COUNT     = var.lambda_retry_count
-      TIMEOUT_SECONDS = var.lambda_timeout_seconds
+      SQS_QUEUE_URL_BLUE         = aws_sqs_queue.compilation_queue_blue.id
+      SQS_QUEUE_URL_GREEN        = aws_sqs_queue.compilation_queue_green.id
+      WEBSOCKET_URL              = var.websocket_url
+      RETRY_COUNT                = var.lambda_retry_count
+      TIMEOUT_SECONDS            = var.lambda_timeout_seconds
+      ENVIRONMENT_NAME           = var.environment
+      COMPILATION_RESULTS_BUCKET = var.compilation_results_bucket
+      COMPILATION_RESULTS_PREFIX = var.compilation_results_prefix
     }
   }
 
   depends_on = [aws_cloudwatch_log_group.compilation]
+
+  publish = true # Required for provisioned concurrency
 
   tags = merge({
     Environment = var.environment
@@ -121,4 +144,11 @@ resource "aws_alb_listener_rule" "compilation" {
     Environment = var.environment
     Purpose     = "compilation-routing"
   }, var.tags)
+}
+
+# Provisioned concurrency to keep at least 1 instance warm
+resource "aws_lambda_provisioned_concurrency_config" "compilation" {
+  function_name                     = aws_lambda_function.compilation.function_name
+  provisioned_concurrent_executions = 1
+  qualifier                         = aws_lambda_function.compilation.version
 }

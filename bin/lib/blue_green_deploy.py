@@ -1,15 +1,18 @@
 """Blue-green deployment management for Compiler Explorer."""
 
+from __future__ import annotations
+
 import logging
 import signal
 import sys
-from typing import Any, Dict, Optional
+from typing import Any
 
 from botocore.exceptions import ClientError
 
-from lib.amazon import elb_client, get_current_key, ssm_client
+from lib.amazon import elb_client, get_current_key, set_current_key, ssm_client
 from lib.aws_utils import (
     get_asg_info,
+    get_instance_private_ip,
     get_target_health_counts,
     protect_asg_capacity,
     reset_asg_min_size,
@@ -22,9 +25,11 @@ from lib.builds_core import (
     set_version_for_deployment,
 )
 from lib.ce_utils import is_running_on_admin_node
+from lib.compiler_routing import update_compiler_routing_table
 from lib.deployment_utils import (
     check_instance_health,
     print_target_group_diagnostics,
+    wait_for_compiler_registration,
     wait_for_http_health,
     wait_for_instances_healthy,
 )
@@ -49,7 +54,7 @@ class BlueGreenDeployment:
         self.running_on_admin_node = is_running_on_admin_node()
 
         # Deployment state for signal handling
-        self._deployment_state: Dict[str, Any] = {
+        self._deployment_state: dict[str, Any] = {
             "active_asg": None,
             "inactive_asg": None,
             "active_original_min": None,
@@ -94,8 +99,6 @@ class BlueGreenDeployment:
         if version_was_changed and original_version_key:
             print(f"Rolling back version to {original_version_key}")
             try:
-                from lib.amazon import set_current_key
-
                 set_current_key(self.cfg, original_version_key)
                 print("✓ Version rolled back successfully")
             except Exception as e:
@@ -146,7 +149,7 @@ class BlueGreenDeployment:
         """Get ASG name for the specified color."""
         return f"{self.env}-{color}"
 
-    def get_listener_rule_arn(self) -> Optional[str]:
+    def get_listener_rule_arn(self) -> str | None:
         """Get the ALB listener rule ARN for this environment."""
         # Get listeners for the load balancer
         listeners = elb_client.describe_listeners(LoadBalancerArn=self._get_load_balancer_arn())
@@ -219,10 +222,13 @@ class BlueGreenDeployment:
 
     def deploy(
         self,
-        target_capacity: Optional[int] = None,
+        target_capacity: int | None = None,
         skip_confirmation: bool = False,
-        version: Optional[str] = None,
-        branch: Optional[str] = None,
+        version: str | None = None,
+        branch: str | None = None,
+        ignore_hash_mismatch: bool = False,
+        skip_compiler_check: bool = False,
+        compiler_timeout: int = 600,
     ) -> None:
         """Perform a blue-green deployment with optional version setting."""
         active_color = self.get_active_color()
@@ -402,7 +408,7 @@ class BlueGreenDeployment:
                         if not release:
                             raise RuntimeError(f"Version {version} not found") from None
 
-                if not set_version_for_deployment(self.cfg, release):
+                if not set_version_for_deployment(self.cfg, release, ignore_hash_mismatch=ignore_hash_mismatch):
                     raise RuntimeError(f"Failed to set version {version}")
 
                 version_was_changed = True
@@ -458,6 +464,28 @@ class BlueGreenDeployment:
                     # Cleanup will happen in finally block
                     return
 
+            # Step 3.5: Check compiler registration (unless skipped)
+            if not skip_compiler_check:
+                print("\nStep 3.5: Checking compiler registration and discovery")
+                try:
+                    wait_for_compiler_registration(instances, self.env, timeout=compiler_timeout)
+                    print("✅ All instances have completed compiler registration!")
+                except TimeoutError:
+                    LOGGER.error("Compiler registration check timed out")
+                    LOGGER.error("Instances may not be ready to handle compilation requests")
+
+                    if skip_confirmation:
+                        LOGGER.error("Deployment aborted due to compiler registration timeout")
+                        raise RuntimeError("Compiler registration timeout") from None
+                    else:
+                        LOGGER.warning("Do you want to proceed anyway? Instances may not be fully ready.")
+                        response = input("Continue with deployment? (yes/no): ").strip().lower()
+                        if response not in ["yes", "y"]:
+                            print("Deployment cancelled due to compiler registration issues.")
+                            return
+            else:
+                print("\nStep 3.5: Skipping compiler registration check (--skip-compiler-check)")
+
             # Step 4: Switch traffic to new color
             print(f"\nStep 4: Switching traffic to {inactive_color}")
             self.switch_target_group(inactive_color)
@@ -471,6 +499,31 @@ class BlueGreenDeployment:
             print(f"\nStep 5.5: Resetting minimum size of {active_asg} to 0 (now inactive)")
             reset_asg_min_size(active_asg, min_size=0)
 
+            # Step 6: Update compiler routing table
+            print(f"\nStep 6: Updating compiler routing table for {self.env}")
+            try:
+                # Get private IPs of new instances to query directly (bypassing ALB propagation delay)
+                instance_ips = []
+                for instance_id in instances:
+                    private_ip = get_instance_private_ip(instance_id)
+                    if private_ip:
+                        instance_ips.append(private_ip)
+
+                if instance_ips:
+                    print("  Querying compiler list directly from new instances (bypassing ALB)")
+                    result = update_compiler_routing_table(self.env, instance_ips=instance_ips)
+                else:
+                    print("  Warning: No instance IPs found, falling back to public API")
+                    result = update_compiler_routing_table(self.env)
+
+                print(
+                    f"  Compiler routing updated: {result['added']} added, {result['updated']} updated, {result['deleted']} deleted"
+                )
+            except Exception as e:
+                LOGGER.warning(f"Failed to update compiler routing table: {e}")
+                LOGGER.warning("Deployment will continue, but compiler routing may be out of date")
+                print(f"  ⚠️  Warning: Compiler routing update failed: {e}")
+
             print(f"\n✅ Blue-green deployment complete! Now serving from {inactive_color}")
             print(f"Old {active_color} ASG remains running for rollback if needed")
 
@@ -479,7 +532,7 @@ class BlueGreenDeployment:
         finally:
             # Always restore active ASG capacity settings, regardless of success or failure
             if active_original_min is not None and active_original_max is not None:
-                print(f"\nStep 6: Restoring original capacity settings for {active_asg}")
+                print(f"\nStep 7: Restoring original capacity settings for {active_asg}")
                 restore_asg_capacity_protection(active_asg, active_original_min, active_original_max)
 
             # If deployment failed, also reset the inactive ASG min size
@@ -494,8 +547,6 @@ class BlueGreenDeployment:
                 if version_was_changed and original_version_key:
                     print(f"\nRolling back version to {original_version_key}")
                     try:
-                        from lib.amazon import set_current_key
-
                         set_current_key(self.cfg, original_version_key)
                         print("✓ Version rolled back successfully")
                     except Exception as e:
@@ -553,12 +604,12 @@ class BlueGreenDeployment:
         scale_asg(inactive_asg, 0)
         print(f"{inactive_asg} scaled to 0")
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         """Get the current status of blue-green deployment."""
         active_color = self.get_active_color()
         inactive_color = self.get_inactive_color()
 
-        status: Dict[str, Any] = {
+        status: dict[str, Any] = {
             "environment": self.env,
             "active_color": active_color,
             "inactive_color": inactive_color,

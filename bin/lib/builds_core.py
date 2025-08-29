@@ -1,10 +1,11 @@
 """Core build functions without CLI dependencies."""
 
+from __future__ import annotations
+
 import datetime
 import os
 import subprocess
 import tempfile
-from typing import Optional
 
 import requests
 
@@ -24,7 +25,7 @@ from lib.env import Config
 from lib.releases import Release, Version
 
 
-def old_deploy_staticfiles(branch: Optional[str], versionfile: str) -> None:
+def old_deploy_staticfiles(branch: str | None, versionfile: str) -> None:
     """Deploy static files using the old method (for releases without static_key)."""
     print("Deploying static files")
     downloadfile = versionfile
@@ -38,7 +39,7 @@ def old_deploy_staticfiles(branch: Optional[str], versionfile: str) -> None:
     subprocess.call(["rm", "-Rf", "deploy"])
 
 
-def deploy_staticfiles_windows(release: Release) -> bool:
+def deploy_staticfiles_windows(release: Release, ignore_hash_mismatch: bool = False) -> bool:
     """Deploy static files to CDN for Windows."""
     print("Deploying static files to cdn (Windows)")
     cc = f"public, max-age={int(datetime.timedelta(days=365).total_seconds())}"
@@ -51,12 +52,17 @@ def deploy_staticfiles_windows(release: Release) -> bool:
         download_release_fileobj(release.static_key, f)
         f.flush()
         with DeploymentJob(
-            f.name, "ce-cdn.net", version=release.version, cache_control=cc, bucket_path="windows"
+            f.name,
+            "ce-cdn.net",
+            version=release.version,
+            cache_control=cc,
+            bucket_path="windows",
+            ignore_hash_mismatch=ignore_hash_mismatch,
         ) as job:
             return job.run()
 
 
-def deploy_staticfiles(release: Release) -> bool:
+def deploy_staticfiles(release: Release, ignore_hash_mismatch: bool = False) -> bool:
     """Deploy static files to CDN."""
     print("Deploying static files to cdn")
     cc = f"public, max-age={int(datetime.timedelta(days=365).total_seconds())}"
@@ -68,17 +74,19 @@ def deploy_staticfiles(release: Release) -> bool:
     with tempfile.NamedTemporaryFile(suffix=os.path.basename(release.static_key)) as f:
         download_release_fileobj(release.static_key, f)
         f.flush()
-        with DeploymentJob(f.name, "ce-cdn.net", version=release.version, cache_control=cc) as job:
+        with DeploymentJob(
+            f.name, "ce-cdn.net", version=release.version, cache_control=cc, ignore_hash_mismatch=ignore_hash_mismatch
+        ) as job:
             return job.run()
 
 
-def check_compiler_discovery(cfg: Config, version: str, branch: Optional[str] = None) -> Optional[Release]:
+def check_compiler_discovery(cfg: Config, version: str, branch: str | None = None) -> Release | None:
     """Check if a version exists and has compiler discovery run.
 
     Returns the Release object if found, None if not found.
     Raises RuntimeError if discovery hasn't run.
     """
-    release: Optional[Release] = None
+    release: Release | None = None
 
     if version == "latest":
         release = find_latest_release(cfg, branch or "")
@@ -107,7 +115,7 @@ def check_compiler_discovery(cfg: Config, version: str, branch: Optional[str] = 
     return release
 
 
-def get_release_without_discovery_check(cfg: Config, version: str, branch: Optional[str] = None) -> Optional[Release]:
+def get_release_without_discovery_check(cfg: Config, version: str, branch: str | None = None) -> Release | None:
     """Get a release without checking compiler discovery."""
     if version == "latest":
         return find_latest_release(cfg, branch or "")
@@ -118,7 +126,7 @@ def get_release_without_discovery_check(cfg: Config, version: str, branch: Optio
             return None
 
 
-def set_version_for_deployment(cfg: Config, release: Release) -> bool:
+def set_version_for_deployment(cfg: Config, release: Release, ignore_hash_mismatch: bool = False) -> bool:
     """Set version for deployment without interactive prompts.
 
     Returns True if successful, False otherwise.
@@ -141,11 +149,11 @@ def set_version_for_deployment(cfg: Config, release: Release) -> bool:
     if release.static_key:
         try:
             if cfg.env.is_windows:
-                if not deploy_staticfiles_windows(release):
+                if not deploy_staticfiles_windows(release, ignore_hash_mismatch=ignore_hash_mismatch):
                     print("Failed to deploy static files (Windows)")
                     return False
             else:
-                if not deploy_staticfiles(release):
+                if not deploy_staticfiles(release, ignore_hash_mismatch=ignore_hash_mismatch):
                     print("Failed to deploy static files")
                     return False
         except Exception as e:

@@ -350,7 +350,12 @@ data "aws_iam_policy_document" "CeSqsPushPop" {
       "sqs:GetQueueAttributes"
     ]
     resources = [
-      module.compilation_lambda_beta.sqs_queue_arn,
+      module.compilation_lambda_beta.sqs_queue_blue_arn,
+      module.compilation_lambda_beta.sqs_queue_green_arn,
+      module.compilation_lambda_staging.sqs_queue_blue_arn,
+      module.compilation_lambda_staging.sqs_queue_green_arn,
+      module.compilation_lambda_prod.sqs_queue_blue_arn,
+      module.compilation_lambda_prod.sqs_queue_green_arn,
     ]
   }
 }
@@ -444,6 +449,11 @@ resource "aws_iam_role_policy_attachment" "CompilerExplorerRole_attach_ScanLibra
 resource "aws_iam_role_policy_attachment" "CompilerExplorerRole_attach_ReadGooGlLinks" {
   role       = aws_iam_role.CompilerExplorerRole.name
   policy_arn = aws_iam_policy.ReadGooGlLinks.arn
+}
+
+resource "aws_iam_role_policy_attachment" "CompilerExplorerRole_attach_AmazonSSMManagedInstanceCore" {
+  role       = aws_iam_role.CompilerExplorerRole.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 // CompilerExplorerRole but for Windows machines
@@ -591,6 +601,11 @@ resource "aws_iam_role_policy_attachment" "Builder_attach_AccessCeParams" {
 resource "aws_iam_role_policy_attachment" "Builder_attach_ReadS3Minimal" {
   role       = aws_iam_role.Builder.name
   policy_arn = aws_iam_policy.ReadS3Minimal.arn
+}
+
+resource "aws_iam_role_policy_attachment" "Builder_attach_AmazonSSMManagedInstanceCore" {
+  role       = aws_iam_role.Builder.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 

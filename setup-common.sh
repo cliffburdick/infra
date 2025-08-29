@@ -4,19 +4,12 @@ set -exuo pipefail
 
 INSTALL_TYPE=${1:-non-ci}
 
-# https://askubuntu.com/questions/132059/how-to-make-a-package-manager-wait-if-another-instance-of-apt-is-running
-wait_for_apt() {
-  while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
-    echo "Waiting for other software managers to finish..."
-    sleep 5
-  done
-}
+# Disable automatic updates etc
+systemctl stop apt-daily{,-upgrade}.{service,timer} unattended-upgrades.service
+systemctl disable apt-daily{,-upgrade}.{service,timer} unattended-upgrades.service
 
-# Sometimes it seems auto apt takes a while to kick in...
-sleep 5
-wait_for_apt
-sleep 5
-wait_for_apt
+# Disable installing recommended packages by default
+echo 'APT::Install-Recommends "false";' > /etc/apt/apt.conf.d/99-no-install-recommends
 
 # Disable unattended upgrades
 apt purge -y --auto-remove unattended-upgrades
@@ -26,7 +19,9 @@ apt-get -y dist-upgrade --force-yes
 
 apt-get -y install \
   autofs \
+  gpg-agent \
   jq \
+  locales \
   libc6-arm64-cross \
   libdatetime-perl \
   libtinfo\* \
@@ -36,11 +31,14 @@ apt-get -y install \
   python3-pip \
   python3-venv \
   qemu-user-static \
+  rsyslog \
   ssmtp \
   unzip \
   wget
 
-apt-get -y autoremove
+locale-gen en_US.UTF-8
+
+apt-get autoremove --purge -y
 
 # This returns amd64 or arm64
 ARCH=$(dpkg --print-architecture)
@@ -141,8 +139,13 @@ setup_grafana() {
     else
       cp /infra/grafana/make-config.sh /etc/grafana/make-config.sh
     fi
+
+    cp /infra/grafana/update-metrics.sh /etc/grafana/update-metrics.sh
+    cp /infra/grafana/ce-metrics.service /lib/systemd/system/ce-metrics.service
     cp /infra/grafana/grafana-agent.service /lib/systemd/system/grafana-agent.service
+
     systemctl daemon-reload
+    systemctl enable ce-metrics
     systemctl enable grafana-agent
 }
 setup_grafana
@@ -187,8 +190,18 @@ rm -rf /tmp/auth_keys
 chown -R ubuntu /home/ubuntu/.ssh
 
 setup_cefs() {
+    # This manual setup should be kept in sync with `ce_install cefs setup`
+    # To save us having to install `uv` etc in our packer stages we duplicate
+    # the setup here.
     mkdir /cefs
-    echo "* -fstype=squashfs,loop,nosuid,nodev,ro :/efs/cefs-images/&.sqfs" > /etc/auto.cefs
+    echo "* -fstype=autofs program:/etc/auto.cefs.sub" > /etc/auto.cefs
+    cat > /etc/auto.cefs.sub << 'EOF'
+#!/bin/bash
+key="$1"
+subdir="${key:0:2}"
+echo "-fstype=squashfs,loop,nosuid,nodev,ro :/efs/cefs-images/${subdir}/${key}.sqfs"
+EOF
+    chmod +x /etc/auto.cefs.sub
     echo "/cefs /etc/auto.cefs --negative-timeout 1" > /etc/auto.master.d/cefs.autofs
     service autofs restart
 }

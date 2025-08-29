@@ -2,10 +2,31 @@ do {
   $ping = test-connection -comp "s3.amazonaws.com" -count 1 -Quiet
 } until ($ping)
 
-# On newer ubuntus this started returning empty and we had to use cloud-init BUT I think that's
-# ubuntu specific.
-$userdata = Invoke-WebRequest -Uri "http://169.254.169.254/latest/user-data" -UseBasicParsing
-$env:CE_ENV = $userdata -as [string]
+# Get metadata token for IMDSv2
+$token = Invoke-WebRequest -Method PUT -Uri "http://169.254.169.254/latest/api/token" -Headers @{"X-aws-ec2-metadata-token-ttl-seconds" = "21600"} -UseBasicParsing
+$tokenHeader = @{"X-aws-ec2-metadata-token" = $token.Content}
+
+# Get Environment tag
+$envTag = Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/tags/instance/Environment" -Headers $tokenHeader -UseBasicParsing
+$env:CE_ENV = $envTag.Content -as [string]
+
+# Get Color tag for blue-green deployment queue routing
+Write-Host "Detecting instance color..."
+try {
+    $colorTag = Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/tags/instance/Color" -Headers $tokenHeader -UseBasicParsing -ErrorAction Stop
+    $instanceColor = $colorTag.Content -as [string]
+    Write-Host "Instance color: $instanceColor"
+}
+catch {
+    Write-Host "No instance color detected, using legacy queue routing"
+    $instanceColor = $null
+}
+
+if ([string]::IsNullOrEmpty($env:CE_ENV)) {
+    Write-Host "Environment tag not set!!"
+    exit 1
+}
+Write-Host "Running in environment $($env:CE_ENV)"
 $DEPLOY_DIR = "/compilerexplorer"
 $CE_ENV = $env:CE_ENV
 $CE_USER = "ce"
@@ -14,8 +35,9 @@ $loghost = "todo"
 $logport = "80"
 
 function GetBetterHostname {
-    $meta = Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/hostname" -UseBasicParsing
-    return $meta -as [string] -replace ".ec2.internal",""
+    $token = Invoke-WebRequest -Method PUT -Uri "http://169.254.169.254/latest/api/token" -Headers @{"X-aws-ec2-metadata-token-ttl-seconds" = "21600"} -UseBasicParsing
+    $meta = Invoke-WebRequest -Uri "http://169.254.169.254/latest/meta-data/hostname" -Headers @{"X-aws-ec2-metadata-token" = $token.Content} -UseBasicParsing
+    return $meta.Content -as [string] -replace ".ec2.internal",""
 }
 
 $betterComputerName = GetBetterHostname
@@ -227,9 +249,13 @@ function InstallAsService {
 function InstallAndRunCEAsSystem {
     $SMBServer = GetSMBServerIP -CeEnv $CE_ENV
 
-    $runargs = ("c:\tmp\infra\init\run.ps1","-LogHost",$loghost,"-LogPort",$logport,"-CeEnv",$CE_ENV,"-HostnameForLogging",$betterComputerName,"-SMBServer",$SMBServer) -join " "
+    $runargs = @("c:\tmp\infra\init\run.ps1","-LogHost",$loghost,"-LogPort",$logport,"-CeEnv",$CE_ENV,"-HostnameForLogging",$betterComputerName,"-SMBServer",$SMBServer)
+    if ($instanceColor) {
+        $runargs += @("-InstanceColor",$instanceColor)
+    }
+    $runargsJoined = $runargs -join " "
 
-    InstallAsSystemService -Name "ce" -Exe "C:\Program Files\PowerShell\7\pwsh.exe" -WorkingDirectory "C:\tmp" -Arguments $runargs
+    InstallAsSystemService -Name "ce" -Exe "C:\Program Files\PowerShell\7\pwsh.exe" -WorkingDirectory "C:\tmp" -Arguments $runargsJoined
 }
 
 function InstallCERunTask {
@@ -238,12 +264,17 @@ function InstallCERunTask {
         [securestring] $Password,
         [string] $CeEnv,
         [string] $HostnameForLogging,
-        [string] $SMBServer
+        [string] $SMBServer,
+        [string] $InstanceColor = $null
     )
 
-    $runargs = ("c:\tmp\infra\init\run.ps1","-LogHost",$loghost,"-LogPort",$logport,"-CeEnv",$CeEnv,"-HostnameForLogging",$HostnameForLogging,"-SMBServer",$SMBServer) -join " "
+    $runargs = @("c:\tmp\infra\init\run.ps1","-LogHost",$loghost,"-LogPort",$logport,"-CeEnv",$CeEnv,"-HostnameForLogging",$HostnameForLogging,"-SMBServer",$SMBServer)
+    if ($InstanceColor) {
+        $runargs += @("-InstanceColor",$InstanceColor)
+    }
+    $runargsJoined = $runargs -join " "
 
-    InstallAsService -Name "ce" -Exe "C:\Program Files\PowerShell\7\pwsh.exe" -WorkingDirectory "C:\tmp" -Arguments $runargs -User $Credential -Password $Password
+    InstallAsService -Name "ce" -Exe "C:\Program Files\PowerShell\7\pwsh.exe" -WorkingDirectory "C:\tmp" -Arguments $runargsJoined -User $Credential -Password $Password
 }
 
 function ConfigureFileRights {
@@ -260,7 +291,7 @@ function CreateCredAndRun {
 
     $SMBServer = GetSMBServerIP -CeEnv $CE_ENV
 
-    InstallCERunTask -Credential $credential -Password $pass -CeEnv $CE_ENV -HostnameForLogging $betterComputerName -SMBServer $SMBServer
+    InstallCERunTask -Credential $credential -Password $pass -CeEnv $CE_ENV -HostnameForLogging $betterComputerName -SMBServer $SMBServer -InstanceColor $instanceColor
 }
 
 function GetLatestCEWrapper {

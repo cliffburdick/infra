@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communication
+
+When writing, especially PRs and commit messages:
+- Avoid emojis
+- Avoid "LLM tells", for example:
+ - Don't use bullet items with `**Heading** - description`, unless it's _absolutely required for emphasis_
+ - Avoid cliches
+- Be terse but informative
+
 ## Build/Test/Lint Commands
 
 - Setup environment: `make ce`
@@ -11,18 +20,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Check code style/linting: `make pre-commit`
 - Install pre-commit hooks: `make install-pre-commit`
 - Build lambda package: `make lambda-package`
+- Build compilation lambda package (Node.js): `make compilation-lambda-package`
 - Build events lambda package: `make events-lambda-package`
+- **NEVER USE THE SYSTEM PYTHON** - always use `uv` to invoke python or pytest or to run experiments with python syntax
 
 ## Important Workflow Requirements
 
 - ALWAYS run pre-commit hooks before committing: `make pre-commit`
-- The hooks will run tests and lint checks, and will fail the commit if there are any issues
+- The hooks will run tests and lint checks, and will fail the commit if there are any issues. You will need to `git add` those changed files
 - Failing to run pre-commit hooks may result in style issues and commit failures
 - For comprehensive validation, run `make static-checks` before committing (includes all linting and type checking)
 - If static checks fail, fix the issues before committing to avoid CI failures
 - **Critical**: After fixing any issues, run `make static-checks` AGAIN. Repeat until it passes completely. Only commit when `make static-checks` runs with zero errors.
 
 ### Correct Commit Workflow
+
 1. Make changes
 2. Run `make static-checks`
 3. If it fails, fix the issues
@@ -34,8 +46,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Python formatting: Black with 120 char line length
 - Use type hints for Python code (mypy for validation)
-  - Use `typing.Any` instead of builtin `any` for type annotations
-  - Import types from `typing` module (e.g., `List`, `Dict`, `Optional`, `Any`)
+  - All Python files must include `from __future__ import annotations` at the top (after docstring)
+  - Use modern Python 3.9+ typing syntax: `list[str]`, `dict[str, Any]`, `str | None` instead of `Optional[str]`
+  - Only import `Any` from `typing` module when needed; use built-in types otherwise
+  - Union types: use `X | Y` syntax instead of `Union[X, Y]`
 - Follow shell best practices (shellcheck enforced)
 - No unused imports or variables (autoflake enforced)
 - Error handling: Use appropriate error classes and logging
@@ -70,6 +84,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repository contains scripts and infrastructure configurations for Compiler Explorer.
 Files in `/opt/compiler-explorer` are the target installation location.
+
+## Instance Management
+
+The `ce instances` command group provides functionality to manage CE instances:
+
+### Available Commands
+
+- **`ce instances isolate`** - Isolate an instance for investigation
+  - Enables stop and termination protection on the EC2 instance
+  - Puts instance into standby mode (removes from ASG rotation)
+  - Deregisters from load balancer (stops serving traffic)
+  - Instance remains accessible via SSH for debugging
+  - Instance appears in `ce instances status` as "Isolated"
+  - Example: `ce --env staging instances isolate`
+
+- **`ce instances terminate-isolated`** - Terminate an isolated instance
+  - Only works on instances in Standby state
+  - Removes stop and termination protection
+  - Terminates the instance (ASG will automatically replace it)
+  - Example: `ce --env staging instances terminate-isolated`
+
+- **`ce instances status`** - Show all instances including isolated ones
+  - Shows active instances registered with load balancer
+  - Shows isolated instances in Standby state
+  - Example: `ce --env prod instances status`
+
+- **`ce instances restart`** - Rolling restart of all instances
+- **`ce instances restart_one`** - Restart a single instance
+- **`ce instances login`** - SSH into an instance
+- **`ce instances exec_all`** - Execute command on all instances
+
+### Isolation Use Cases
+
+Use instance isolation when you need to:
+- Debug production issues without affecting traffic
+- Investigate memory leaks or performance problems
+- Analyze core dumps or logs
+- Test fixes before applying to all instances
 
 ## CLI Architecture
 
@@ -147,6 +199,100 @@ The `ce workflows` command group provides functionality to trigger GitHub Action
   - Example: `ce workflows watch 15778532626 --web`
 
 All workflow trigger commands support `--dry-run` to preview the `gh` command without executing it.
+
+## Compilation Lambda Management
+
+The `ce compilation-lambda` command group provides emergency controls for the compilation Lambda routing system:
+
+### Available Commands
+
+- **`ce compilation-lambda killswitch ENVIRONMENT`** - EMERGENCY: Disable compilation Lambda ALB routing for an environment
+  - Immediately stops routing compilation requests through Lambda
+  - Falls back to legacy instance-based routing within seconds
+  - Environments: beta, staging, prod
+  - Use `--skip-confirmation` to skip confirmation prompt
+  - Example: `ce compilation-lambda killswitch beta`
+
+- **`ce compilation-lambda enable ENVIRONMENT`** - Re-enable compilation Lambda ALB routing for an environment
+  - Restores routing of compilation requests through Lambda
+  - Takes effect immediately after ALB rule modification
+  - Use `--skip-confirmation` to skip confirmation prompt
+  - Example: `ce compilation-lambda enable beta`
+
+- **`ce compilation-lambda status [ENVIRONMENT]`** - Show current status of compilation Lambda ALB routing
+  - Shows actual ALB listener rule state (not Terraform configuration)
+  - Status indicators:
+    - 🟢 ENABLED: Lambda routing active
+    - 🚨 KILLSWITCH ACTIVE: Using instance routing
+    - 🔴 NOT_FOUND: No ALB rule exists
+  - Without environment argument, shows status for all environments
+  - Example: `ce compilation-lambda status` or `ce compilation-lambda status prod`
+
+### Usage Scenarios
+
+**Emergency Response**: Use killswitch when Lambda compilation system is experiencing issues:
+```bash
+# Disable Lambda routing for production
+ce compilation-lambda killswitch prod
+
+# Check status across all environments
+ce compilation-lambda status
+
+# Re-enable when issues are resolved
+ce compilation-lambda enable prod
+```
+
+### Technical Details
+
+- Modifies ALB listener rules directly (bypasses Terraform)
+- Changes take effect immediately without deployment
+- Killswitch works by changing path patterns to never match
+- Enable restores original path patterns for the environment
+
+## Compiler Routing Management
+
+The `ce compiler-routing` command group provides functionality to manage compiler-to-queue routing mappings in DynamoDB:
+
+### Available Commands
+
+- **`ce compiler-routing update [--env ENVIRONMENT]`** - Update compiler routing table for specified environment using live API data
+  - Uses current environment if not specified
+  - Use `--dry-run` to preview changes without making them
+  - Use `--skip-confirmation` to skip confirmation prompt
+  - Example: `ce --env prod compiler-routing update --dry-run`
+
+- **`ce compiler-routing status`** - Show current compiler routing table statistics
+  - Displays total compilers, environments, routing types, and queue distribution
+  - Example output shows prod (queue routing) vs winprod (URL routing)
+
+- **`ce compiler-routing lookup COMPILER_ID`** - Look up routing assignment for a specific compiler
+  - Shows environment, routing type (queue/url), and target (queue name or URL)
+  - Uses current environment context
+  - Example: `ce --env prod compiler-routing lookup gcc-trunk`
+
+- **`ce compiler-routing validate [--env ENVIRONMENT]`** - Validate routing table consistency against live API data
+  - Compares current table with live API data to identify needed changes
+  - Validates specific environment or all environments
+  - Example: `ce compiler-routing validate --env winprod`
+
+- **`ce compiler-routing clear --env ENVIRONMENT`** - Clear routing entries for a specific environment
+  - Removes all routing entries for the specified environment
+  - Affected compilers fall back to default queue routing
+  - Use `--skip-confirmation` to skip confirmation prompt
+  - Example: `ce compiler-routing clear --env staging --skip-confirmation`
+
+
+### Architecture Features
+
+- **Environment Isolation**: Uses composite keys (e.g., `prod#gcc-trunk`) to prevent cross-environment conflicts
+- **Hybrid Routing**: Supports both SQS queue routing and direct URL forwarding based on environment configuration
+- **Backward Compatibility**: Legacy entries are supported during transition period
+- **Multi-Environment Support**: Single DynamoDB table serves all environments (prod, staging, beta, winprod, etc.)
+
+### Routing Strategies by Environment
+
+- **Queue Environments**: prod, staging, beta → Route to SQS queues
+- **URL Environments**: winprod, winstaging, wintest, gpu, aarch64prod, aarch64staging, runner → Forward directly to environment URLs
 
 ## AWS Integration Pattern
 
@@ -238,11 +384,43 @@ The codebase supports multiple environments defined in `lib/env.py`:
 
 Each environment has properties like `keep_builds`, `is_windows`, `is_prod`, etc.
 
-## Blue-Green Deployment Notifications
+## Blue-Green Deployment Process
 
-The blue-green deployment system includes GitHub notification functionality that automatically notifies PRs and issues when they go live in production.
+The blue-green deployment system includes automatic post-deployment steps that ensure the environment is fully configured.
 
-### How It Works
+### Deployment Steps
+
+1. **Version Setting**: Updates the deployed version (if specified)
+2. **Scale Up**: Scales the inactive ASG to target capacity
+3. **Health Checks**: Waits for instances to be healthy
+4. **Traffic Switch**: Switches load balancer traffic to new instances
+5. **Scale Down Protection**: Resets ASG minimum sizes
+6. **Compiler Routing Update**: Automatically updates the compiler routing table for the environment
+7. **GitHub Notifications**: Sends notifications for production deployments (when enabled)
+
+### Compiler Routing Integration
+
+After successful deployment, the system automatically runs `compiler-routing update` for the deployed environment:
+
+- **Automatic**: No manual intervention required
+- **Environment-specific**: Only updates routing for the deployed environment
+- **Safe**: Deployment continues even if routing update fails (with warning)
+- **Informative**: Shows count of added/updated/deleted routing entries
+
+### Color-Specific Queue Routing
+
+The blue-green deployment system uses color-specific SQS queues to prevent queue consumption overlap:
+
+- **Instance Color Detection**: Instances automatically detect their color from EC2 instance tags (`Color` tag)
+- **Startup Parameter Passing**: `init/start.sh` and `start.ps1` pass `--instance-color` to Node.js when color is detected
+- **Queue Separation**: Blue instances consume from blue queues, green instances consume from green queues
+- **Lambda Routing**: Compilation Lambda routes requests to the active color's queue based on SSM parameter
+
+### GitHub Notification System
+
+The deployment system includes GitHub notification functionality that automatically notifies PRs and issues when they go live in production.
+
+#### How It Works
 
 - **Production Only**: Notifications are only sent when deploying to production environment
 - **Version Change Detection**: Only notifies when there's an actual version change between deployments
@@ -294,6 +472,10 @@ Send 'now live' notifications to GitHub issues/PRs? [yes/dry-run/no] (yes):
 - **yes**: Sends actual notifications
 - **dry-run**: Shows what would be notified without sending
 - **no**: Skips notifications entirely
+
+## CE Install Filter System
+
+The `ce_install` command supports a filter system to narrow down installables. Filter syntax and usage patterns are documented in `docs/filter-system.md`.
 
 ## Terraform Integration
 

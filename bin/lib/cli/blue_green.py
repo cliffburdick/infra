@@ -1,6 +1,6 @@
 """Blue-green deployment CLI commands."""
 
-from typing import Optional
+from __future__ import annotations
 
 import click
 
@@ -22,7 +22,7 @@ from lib.env import BLUE_GREEN_ENABLED_ENVIRONMENTS, Config, Environment
 from lib.notify import handle_notify
 
 
-def _get_commit_hash_for_version(cfg: Config, version_key: Optional[str]) -> Optional[str]:
+def _get_commit_hash_for_version(cfg: Config, version_key: str | None) -> str | None:
     """Convert a version key to its commit hash."""
     if not version_key:
         return None
@@ -35,9 +35,7 @@ def _get_commit_hash_for_version(cfg: Config, version_key: Optional[str]) -> Opt
         return None
 
 
-def _get_commit_hash_for_version_param(
-    cfg: Config, version: Optional[str], branch: Optional[str] = None
-) -> Optional[str]:
+def _get_commit_hash_for_version_param(cfg: Config, version: str | None, branch: str | None = None) -> str | None:
     """Convert a version parameter (from CLI) to its commit hash."""
     if not version:
         return None
@@ -200,17 +198,30 @@ def blue_green_status(cfg: Config, detailed: bool):
 @click.option("--notify/--no-notify", help="Send GitHub notifications for newly released PRs (prod only)", default=None)
 @click.option("--dry-run-notify", is_flag=True, help="Show what notifications would be sent without sending them")
 @click.option("--check-notifications", is_flag=True, help="Only check what notifications would be sent, don't deploy")
+@click.option(
+    "--ignore-hash-mismatch", help="Continue deployment even if files have unexpected hash values", is_flag=True
+)
+@click.option("--skip-compiler-check", help="Skip compiler registration check before switching traffic", is_flag=True)
+@click.option(
+    "--compiler-timeout",
+    type=int,
+    default=600,
+    help="Timeout in seconds for compiler registration check (default: 600)",
+)
 @click.argument("version", required=False)
 @click.pass_obj
 def blue_green_deploy(
     cfg: Config,
     capacity: int,
     skip_confirmation: bool,
-    branch: Optional[str],
-    notify: Optional[bool],
+    branch: str | None,
+    notify: bool | None,
     dry_run_notify: bool,
     check_notifications: bool,
-    version: Optional[str],
+    ignore_hash_mismatch: bool,
+    skip_compiler_check: bool,
+    compiler_timeout: int,
+    version: str | None,
 ):
     """Deploy to the inactive color using blue-green strategy.
 
@@ -235,8 +246,8 @@ def blue_green_deploy(
     inactive = deployment.get_inactive_color()
 
     # Track commit hashes for notifications (before deployment starts)
-    original_commit_hash: Optional[str] = None
-    target_commit_hash: Optional[str] = None
+    original_commit_hash: str | None = None
+    target_commit_hash: str | None = None
 
     if cfg.env == Environment.PROD:
         # Get original commit hash (what's currently deployed)
@@ -342,7 +353,15 @@ def blue_green_deploy(
             should_notify = False  # Don't notify immediately
 
     try:
-        deployment.deploy(target_capacity=capacity, skip_confirmation=skip_confirmation, version=version, branch=branch)
+        deployment.deploy(
+            target_capacity=capacity,
+            skip_confirmation=skip_confirmation,
+            version=version,
+            branch=branch,
+            ignore_hash_mismatch=ignore_hash_mismatch,
+            skip_compiler_check=skip_compiler_check,
+            compiler_timeout=compiler_timeout,
+        )
         print("\nDeployment successful!")
         print("Run 'ce blue-green rollback' if you need to revert")
 

@@ -87,7 +87,7 @@ $(UV_DEPS): $(UV_BIN) pyproject.toml
 PY_SOURCE_ROOTS:=bin/lib bin/test lambda
 
 .PHONY: test
-test: ce  ## Runs the tests
+test: ce test-compilation-lambda  ## Runs all tests (Python and Node.js)
 	$(UV_BIN) run pytest $(PY_SOURCE_ROOTS)
 
 .PHONY: static-checks
@@ -98,7 +98,12 @@ static-checks: ce  ## Runs all the static tests
 mugs: ce  ## Generate all ABI reference mug designs (SVG + PNG)
 	$(UV_BIN) run mugs/make_x86_64_systemv_mug.py mugs/x86_64_systemv_abi_mug.svg
 	$(UV_BIN) run mugs/make_x86_64_msvc_mug.py mugs/x86_64_msvc_abi_mug.svg
+	$(UV_BIN) run mugs/make_x86_64_go_mug.py mugs/x86_64_go_abi_mug.svg
 	$(UV_BIN) run mugs/make_arm64_mug.py mugs/arm64_abi_mug.svg
+	$(UV_BIN) run mugs/make_arm32_eabi_mug.py mugs/arm32_eabi_mug.svg
+	$(UV_BIN) run mugs/make_arm64_go_mug.py mugs/arm64_go_abi_mug.svg
+	$(UV_BIN) run mugs/make_riscv_mug.py mugs/riscv_abi_mug.svg
+	$(UV_BIN) run mugs/make_riscv_go_mug.py mugs/riscv_go_abi_mug.svg
 
 LAMBDA_PACKAGE:=$(CURDIR)/.dist/lambda-package.zip
 LAMBDA_PACKAGE_SHA:=$(CURDIR)/.dist/lambda-package.zip.sha256
@@ -162,46 +167,58 @@ EVENTS_LAMBDA_PACKAGE_DIR:=$(CURDIR)/.dist/events-lambda-package
 EVENTS_LAMBDA_PACKAGE:=$(CURDIR)/.dist/events-lambda-package.zip
 EVENTS_LAMBDA_PACKAGE_SHA:=$(CURDIR)/.dist/events-lambda-package.zip.sha256
 EVENTS_LAMBDA_DIR:=$(CURDIR)/events-lambda
-$(EVENTS_LAMBDA_PACKAGE):
-	rm -rf $(EVENTS_LAMBDA_PACKAGE_DIR)
-	mkdir -p $(EVENTS_LAMBDA_PACKAGE_DIR)
-	cd $(EVENTS_LAMBDA_DIR) && npm i && npm run lint && npm install --no-audit --ignore-scripts --production && npm install --no-audit --ignore-scripts --production --cpu arm64 && cd ..
-	cp -R $(EVENTS_LAMBDA_DIR)/* $(EVENTS_LAMBDA_PACKAGE_DIR)
-	rm -f $(EVENTS_LAMBDA_PACKAGE)
-	cd $(EVENTS_LAMBDA_PACKAGE_DIR) && zip -r $(EVENTS_LAMBDA_PACKAGE) .
-
-$(EVENTS_LAMBDA_PACKAGE_SHA): $(EVENTS_LAMBDA_PACKAGE)
-	openssl dgst -sha256 -binary $(EVENTS_LAMBDA_PACKAGE) | openssl enc -base64 > $@
+$(EVENTS_LAMBDA_PACKAGE) $(EVENTS_LAMBDA_PACKAGE_SHA): $(wildcard events-lambda/*.js) events-lambda/package.json Makefile scripts/build_nodejs_lambda_deterministic.py
+	$(UV_BIN) run python scripts/build_nodejs_lambda_deterministic.py $(EVENTS_LAMBDA_DIR) $(EVENTS_LAMBDA_PACKAGE)
 
 .PHONY: events-lambda-package  ## builds events lambda
 events-lambda-package: $(EVENTS_LAMBDA_PACKAGE) $(EVENTS_LAMBDA_PACKAGE_SHA)
 
 COMPILATION_LAMBDA_PACKAGE:=$(CURDIR)/.dist/compilation-lambda-package.zip
 COMPILATION_LAMBDA_PACKAGE_SHA:=$(CURDIR)/.dist/compilation-lambda-package.zip.sha256
-$(COMPILATION_LAMBDA_PACKAGE) $(COMPILATION_LAMBDA_PACKAGE_SHA): $(wildcard compilation-lambda/*.py) compilation-lambda/pyproject.toml Makefile scripts/build_lambda_deterministic.py
-	$(UV_BIN) run python scripts/build_lambda_deterministic.py $(CURDIR)/compilation-lambda $(COMPILATION_LAMBDA_PACKAGE)
+$(COMPILATION_LAMBDA_PACKAGE) $(COMPILATION_LAMBDA_PACKAGE_SHA): $(wildcard compilation-lambda/*.js) $(wildcard compilation-lambda/lib/*.js) compilation-lambda/package.json Makefile scripts/build_nodejs_lambda_deterministic.py
+	$(UV_BIN) run python scripts/build_nodejs_lambda_deterministic.py $(CURDIR)/compilation-lambda $(COMPILATION_LAMBDA_PACKAGE)
 
 .PHONY: compilation-lambda-package  ## builds compilation lambda
 compilation-lambda-package: $(COMPILATION_LAMBDA_PACKAGE) $(COMPILATION_LAMBDA_PACKAGE_SHA)
 
 .PHONY: test-compilation-lambda  ## runs compilation lambda tests
-test-compilation-lambda: ce
-	cd compilation-lambda && $(UV_BIN) run --with websocket-client --with boto3 --with pytest python -m pytest test_lambda_function.py -v
+test-compilation-lambda:
+	cd compilation-lambda && npm install && npm test
 
 .PHONY: events-lambda-package  ## Builds events-lambda
 events-lambda-package: $(EVENTS_LAMBDA_PACKAGE) $(EVENTS_LAMBDA_PACKAGE_SHA)
 
+.PHONY: check-events-lambda-changed
+check-events-lambda-changed: events-lambda-package
+	@mkdir -p $(dir $(EVENTS_LAMBDA_PACKAGE))
+	@echo "Checking if events lambda package has changed..."
+	@aws s3 cp s3://compiler-explorer/lambdas/events-lambda-package.zip.sha256 $(EVENTS_LAMBDA_PACKAGE_SHA).remote 2>/dev/null || (echo "Remote events lambda SHA doesn't exist yet" && touch $(EVENTS_LAMBDA_PACKAGE_SHA).remote)
+	@if [ ! -f $(EVENTS_LAMBDA_PACKAGE_SHA).remote ] || ! cmp -s $(EVENTS_LAMBDA_PACKAGE_SHA) $(EVENTS_LAMBDA_PACKAGE_SHA).remote; then \
+		echo "Events lambda package has changed"; \
+		echo "EVENTS_LAMBDA_CHANGED=1" > $(EVENTS_LAMBDA_PACKAGE_SHA).status; \
+	else \
+		echo "Events lambda package has not changed"; \
+		echo "EVENTS_LAMBDA_CHANGED=0" > $(EVENTS_LAMBDA_PACKAGE_SHA).status; \
+	fi
+
 .PHONY: upload-events-lambda
-upload-events-lambda: events-lambda-package  ## Uploads events-lambda to S3
-	aws s3 cp $(EVENTS_LAMBDA_PACKAGE) s3://compiler-explorer/lambdas/events-lambda-package.zip
-	aws s3 cp --content-type text/sha256 $(EVENTS_LAMBDA_PACKAGE_SHA) s3://compiler-explorer/lambdas/events-lambda-package.zip.sha256
+upload-events-lambda: check-events-lambda-changed  ## Uploads events-lambda to S3
+	@. $(EVENTS_LAMBDA_PACKAGE_SHA).status && \
+	if [ "$$EVENTS_LAMBDA_CHANGED" = "1" ]; then \
+		echo "Uploading new events lambda package to S3..."; \
+		aws s3 cp $(EVENTS_LAMBDA_PACKAGE) s3://compiler-explorer/lambdas/events-lambda-package.zip; \
+		aws s3 cp --content-type text/sha256 $(EVENTS_LAMBDA_PACKAGE_SHA) s3://compiler-explorer/lambdas/events-lambda-package.zip.sha256; \
+		echo "Events lambda package uploaded successfully!"; \
+	else \
+		echo "Events lambda package hasn't changed. No upload needed."; \
+	fi
 
 .PHONY: terraform-apply
-terraform-apply:  upload-lambda upload-compilation-lambda ## Applies terraform
+terraform-apply:  upload-lambda upload-compilation-lambda upload-events-lambda ## Applies terraform
 	terraform -chdir=terraform apply
 
 .PHONY: terraform-plan
-terraform-plan:  upload-lambda upload-compilation-lambda ## Plans terraform changes
+terraform-plan:  upload-lambda upload-compilation-lambda upload-events-lambda ## Plans terraform changes
 	terraform -chdir=terraform plan
 
 .PHONY: pre-commit

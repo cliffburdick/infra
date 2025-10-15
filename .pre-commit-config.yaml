@@ -16,8 +16,9 @@ repos:
     rev: v0.12.9
     hooks:
       - id: ruff
-        args: [ --fix ]
+        args: [ --fix, --preview ]
       - id: ruff-format
+        args: [ --preview ]
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.17.1
     hooks:
@@ -48,3 +49,9 @@ repos:
         types_or: [python, shell]
         pass_filenames: false
         require_serial: true
+      - id: lint-events-lambda
+        name: Lint events-lambda
+        entry: bash -c 'cd events-lambda && npm install && npm run lint'
+        language: system
+        files: ^events-lambda/.*\.(js|json|yml)$
+        pass_filenames: false

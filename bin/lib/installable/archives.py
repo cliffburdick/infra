@@ -142,7 +142,7 @@ class NightlyInstallable(Installable):
 
         destination = self.install_context.destination
         if self.subdir:
-            if exe.split("/")[0] == self.subdir:
+            if exe.split("/", maxsplit=1)[0] == self.subdir:
                 destination = destination / self.subdir
                 relative_exe = "/".join(exe.split("/")[2:])
             else:
@@ -366,7 +366,7 @@ class RestQueryTarballInstallable(TarballInstallable):
         query = self.config_get("query")
         try:
             self.url = eval(query, {}, dict(document=document))
-        except Exception:
+        except Exception:  # noqa: BLE001
             self._logger.exception("Exception evaluating query '%s' for %s", query, self)
             raise
         if not self.url:

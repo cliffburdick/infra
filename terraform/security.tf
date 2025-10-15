@@ -67,9 +67,9 @@ resource "aws_security_group_rule" "CE_ConanHttpFromAlb" {
   type                     = "ingress"
   from_port                = 1080
   to_port                  = 1080
-  source_security_group_id = aws_security_group.CompilerExplorerAlb.id
+  source_security_group_id = aws_security_group.InternalServicesAlb.id
   protocol                 = "tcp"
-  description              = "Allow HTTP access from the ALB"
+  description              = "Allow HTTP access from the internal services ALB"
 }
 
 resource "aws_security_group_rule" "CE_HttpsFromAlb" {
@@ -87,9 +87,9 @@ resource "aws_security_group_rule" "CE_ConanHttpsFromAlb" {
   type                     = "ingress"
   from_port                = 1443
   to_port                  = 1443
-  source_security_group_id = aws_security_group.CompilerExplorerAlb.id
+  source_security_group_id = aws_security_group.InternalServicesAlb.id
   protocol                 = "tcp"
-  description              = "Allow HTTPS access from the ALB"
+  description              = "Allow HTTPS access from the internal services ALB"
 }
 
 resource "aws_security_group" "CompilerExplorerAlb" {
@@ -98,6 +98,15 @@ resource "aws_security_group" "CompilerExplorerAlb" {
   description = "Load balancer security group"
   tags = {
     Name = "CELoadBalancer"
+  }
+}
+
+resource "aws_security_group" "InternalServicesAlb" {
+  vpc_id      = module.ce_network.vpc.id
+  name        = "internal-services-alb-sg"
+  description = "Security group for internal services load balancer (conan, etc)"
+  tags = {
+    Name = "InternalServicesLoadBalancer"
   }
 }
 
@@ -112,19 +121,46 @@ resource "aws_security_group_rule" "ALB_HttpsFromAnywhere" {
   description       = "Allow HTTPS access from anywhere"
 }
 
-resource "aws_security_group_rule" "ALB_ConanHttpsFromAnywhere" {
+resource "aws_security_group_rule" "ALB_EgressToAnywhere" {
   security_group_id = aws_security_group.CompilerExplorerAlb.id
+  type              = "egress"
+  from_port         = 0
+  to_port           = 65535
+  cidr_blocks       = ["0.0.0.0/0"]
+  ipv6_cidr_blocks  = ["::/0"]
+  protocol          = "-1"
+  description       = "Allow egress to anywhere"
+}
+
+# TODO: Consider restricting these ports to CloudFront IP ranges only for better security.
+# Can use AWS managed prefix list: prefix_list_ids = ["pl-3b927c52"] instead of cidr_blocks.
+# Ports 1080/1443 are only used by conan via CloudFront, so there's no legitimate direct access.
+# Check with CE team before tightening to ensure no one is using direct ALB access for debugging.
+
+resource "aws_security_group_rule" "InternalALB_ConanHttpsFromAnywhere" {
+  security_group_id = aws_security_group.InternalServicesAlb.id
   type              = "ingress"
   from_port         = 1443
   to_port           = 1443
   cidr_blocks       = ["0.0.0.0/0"]
   ipv6_cidr_blocks  = ["::/0"]
   protocol          = "tcp"
-  description       = "Allow HTTPS access from anywhere"
+  description       = "Allow HTTPS access from anywhere (port 1443 for conan)"
 }
 
-resource "aws_security_group_rule" "ALB_EgressToAnywhere" {
-  security_group_id = aws_security_group.CompilerExplorerAlb.id
+resource "aws_security_group_rule" "InternalALB_ConanHttpFromAnywhere" {
+  security_group_id = aws_security_group.InternalServicesAlb.id
+  type              = "ingress"
+  from_port         = 1080
+  to_port           = 1080
+  cidr_blocks       = ["0.0.0.0/0"]
+  ipv6_cidr_blocks  = ["::/0"]
+  protocol          = "tcp"
+  description       = "Allow HTTP access from anywhere (port 1080 for conan)"
+}
+
+resource "aws_security_group_rule" "InternalALB_EgressToAnywhere" {
+  security_group_id = aws_security_group.InternalServicesAlb.id
   type              = "egress"
   from_port         = 0
   to_port           = 65535
@@ -227,6 +263,12 @@ resource "aws_iam_role" "CompilerExplorerRole" {
 resource "aws_iam_role" "CompilerExplorerWindowsRole" {
   name               = "CompilerExplorerWindowsRole"
   description        = "Compiler Explorer Windows node role"
+  assume_role_policy = data.aws_iam_policy_document.InstanceAssumeRolePolicy.json
+}
+
+resource "aws_iam_role" "CeRouterRole" {
+  name               = "CeRouterRole"
+  description        = "CE Router instances role"
   assume_role_policy = data.aws_iam_policy_document.InstanceAssumeRolePolicy.json
 }
 
@@ -345,17 +387,18 @@ data "aws_iam_policy_document" "CeSqsPushPop" {
   statement {
     sid = "CompilationQueueAccess"
     actions = [
+      "sqs:SendMessage",
       "sqs:ReceiveMessage",
       "sqs:DeleteMessage",
       "sqs:GetQueueAttributes"
     ]
     resources = [
-      module.compilation_lambda_beta.sqs_queue_blue_arn,
-      module.compilation_lambda_beta.sqs_queue_green_arn,
-      module.compilation_lambda_staging.sqs_queue_blue_arn,
-      module.compilation_lambda_staging.sqs_queue_green_arn,
-      module.compilation_lambda_prod.sqs_queue_blue_arn,
-      module.compilation_lambda_prod.sqs_queue_green_arn,
+      module.beta_blue_green.sqs_queue_blue_arn,
+      module.beta_blue_green.sqs_queue_green_arn,
+      module.staging_blue_green.sqs_queue_blue_arn,
+      module.staging_blue_green.sqs_queue_green_arn,
+      module.prod_blue_green.sqs_queue_blue_arn,
+      module.prod_blue_green.sqs_queue_green_arn,
     ]
   }
 }
@@ -364,6 +407,99 @@ resource "aws_iam_policy" "CeSqsPushPop" {
   name        = "CeSqsPushPop"
   description = "Can push/pop SQS execution queues and receive compilation queue messages"
   policy      = data.aws_iam_policy_document.CeSqsPushPop.json
+}
+
+# IAM policy for CE Router to access CompilerRouting DynamoDB table
+data "aws_iam_policy_document" "CeRouterDynamoDB" {
+  statement {
+    sid = "CompilerRoutingAccess"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:Query",
+      "dynamodb:Scan"
+    ]
+    resources = [
+      aws_dynamodb_table.compiler_routing.arn
+    ]
+  }
+
+  statement {
+    sid = "WebSocketConnectionsAccess"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:Query",
+      "dynamodb:Scan"
+    ]
+    resources = [
+      aws_dynamodb_table.events-connections.arn,
+      "${aws_dynamodb_table.events-connections.arn}/index/SubscriptionIndex"
+    ]
+  }
+}
+
+resource "aws_iam_policy" "CeRouterDynamoDB" {
+  name        = "CeRouterDynamoDB"
+  description = "CE Router access to DynamoDB tables for routing and WebSocket connections"
+  policy      = data.aws_iam_policy_document.CeRouterDynamoDB.json
+}
+
+# IAM policy for CE Router to access API Gateway WebSocket API
+data "aws_iam_policy_document" "CeRouterApiGateway" {
+  statement {
+    sid = "WebSocketApiAccess"
+    actions = [
+      "execute-api:ManageConnections",
+      "execute-api:Invoke"
+    ]
+    resources = ["arn:aws:execute-api:*:*:*/prod/POST/@connections/*"]
+  }
+}
+
+resource "aws_iam_policy" "CeRouterApiGateway" {
+  name        = "CeRouterApiGateway"
+  description = "CE Router access to API Gateway WebSocket API"
+  policy      = data.aws_iam_policy_document.CeRouterApiGateway.json
+}
+
+# IAM policy for CE Router read-only S3 access
+data "aws_iam_policy_document" "CeRouterS3ReadOnly" {
+  statement {
+    sid = "S3ReadOnlyAccess"
+    actions = [
+      "s3:GetObject",
+      "s3:ListBucket"
+    ]
+    resources = [
+      "${aws_s3_bucket.storage-godbolt-org.arn}/*",
+      aws_s3_bucket.storage-godbolt-org.arn
+    ]
+  }
+}
+
+resource "aws_iam_policy" "CeRouterS3ReadOnly" {
+  name        = "CeRouterS3ReadOnly"
+  description = "CE Router read-only access to storage S3 bucket"
+  policy      = data.aws_iam_policy_document.CeRouterS3ReadOnly.json
+}
+
+# IAM policy for CE Router SQS send-only access
+data "aws_iam_policy_document" "CeRouterSQSSendOnly" {
+  statement {
+    sid = "SQSSendMessages"
+    actions = [
+      "sqs:SendMessage",
+      "sqs:GetQueueAttributes"
+    ]
+    resources = ["arn:aws:sqs:us-east-1:*:*-compilation-queue-*.fifo"]
+  }
+}
+
+resource "aws_iam_policy" "CeRouterSQSSendOnly" {
+  name        = "CeRouterSQSSendOnly"
+  description = "CE Router send-only access to compilation queues"
+  policy      = data.aws_iam_policy_document.CeRouterSQSSendOnly.json
 }
 
 data "aws_iam_policy_document" "AccessCeParams" {
@@ -456,6 +592,28 @@ resource "aws_iam_role_policy_attachment" "CompilerExplorerRole_attach_AmazonSSM
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+// CE Router Role policy attachments
+resource "aws_iam_role_policy_attachment" "CeRouterRole_attach_CeRouterDynamoDB" {
+  role       = aws_iam_role.CeRouterRole.name
+  policy_arn = aws_iam_policy.CeRouterDynamoDB.arn
+}
+
+
+resource "aws_iam_role_policy_attachment" "CeRouterRole_attach_CeRouterS3ReadOnly" {
+  role       = aws_iam_role.CeRouterRole.name
+  policy_arn = aws_iam_policy.CeRouterS3ReadOnly.arn
+}
+
+resource "aws_iam_role_policy_attachment" "CeRouterRole_attach_CeRouterSQSSendOnly" {
+  role       = aws_iam_role.CeRouterRole.name
+  policy_arn = aws_iam_policy.CeRouterSQSSendOnly.arn
+}
+
+resource "aws_iam_role_policy_attachment" "CeRouterRole_attach_AmazonSSMManagedInstanceCore" {
+  role       = aws_iam_role.CeRouterRole.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 // CompilerExplorerRole but for Windows machines
 resource "aws_iam_role_policy_attachment" "CompilerExplorerWindowsRole_attach_CloudWatchAgentServerPolicy" {
   role       = aws_iam_role.CompilerExplorerWindowsRole.name
@@ -503,59 +661,12 @@ resource "aws_security_group_rule" "CE_AuthHttpFromAlb" {
   description              = "Allow port 3000 access from the ALB"
 }
 
-resource "aws_security_group" "Builder" {
-  vpc_id      = module.ce_network.vpc.id
-  name        = "BuilderNodeSecGroup"
-  description = "Compiler Explorer compiler and library security group"
-  tags = {
-    Name = "Builder"
-  }
-}
 
-// The builder needs to be able to fetch things from the wider internet.
-resource "aws_security_group_rule" "Builder_EgressToAll" {
-  security_group_id = aws_security_group.Builder.id
-  type              = "egress"
-  from_port         = 0
-  to_port           = 65535
-  cidr_blocks       = ["0.0.0.0/0"]
-  ipv6_cidr_blocks  = ["::/0"]
-  protocol          = "-1"
-  description       = "Unfettered outbound access"
-}
 
-resource "aws_security_group_rule" "Builder_SshFromAdminNode" {
-  security_group_id        = aws_security_group.Builder.id
-  type                     = "ingress"
-  from_port                = 22
-  to_port                  = 22
-  source_security_group_id = aws_security_group.AdminNode.id
-  protocol                 = "tcp"
-  description              = "Allow SSH access from the admin node only"
-}
 
-// TODO: remove this comment once we're happy with the builder:
-// * builder used to have AmazonSFullAccess and AmazonSSMReadOnlyAccess
-resource "aws_iam_role" "Builder" {
-  name               = "Builder"
-  description        = "Compiler Explorer compiler and library building role"
-  assume_role_policy = data.aws_iam_policy_document.InstanceAssumeRolePolicy.json
-}
 
-resource "aws_iam_instance_profile" "Builder" {
-  name = "Builder"
-  role = aws_iam_role.Builder.name
-}
 
-resource "aws_iam_role_policy_attachment" "Builder_attach_CloudWatchAgentServerPolicy" {
-  role       = aws_iam_role.Builder.name
-  policy_arn = data.aws_iam_policy.CloudWatchAgentServerPolicy.arn
-}
 
-resource "aws_iam_role_policy_attachment" "Builder_attach_UpdateLibraryBuildHistory" {
-  role       = aws_iam_role.Builder.name
-  policy_arn = aws_iam_policy.UpdateLibraryBuildHistory.arn
-}
 
 data "aws_iam_policy_document" "CeBuilderStorageAccess" {
   statement {
@@ -588,25 +699,9 @@ resource "aws_iam_policy" "CeBuilderStorageAccess" {
   policy      = data.aws_iam_policy_document.CeBuilderStorageAccess.json
 }
 
-resource "aws_iam_role_policy_attachment" "Builder_attach_CeBuilderStorageAccess" {
-  role       = aws_iam_role.Builder.name
-  policy_arn = aws_iam_policy.CeBuilderStorageAccess.arn
-}
 
-resource "aws_iam_role_policy_attachment" "Builder_attach_AccessCeParams" {
-  role       = aws_iam_role.Builder.name
-  policy_arn = aws_iam_policy.AccessCeParams.arn
-}
 
-resource "aws_iam_role_policy_attachment" "Builder_attach_ReadS3Minimal" {
-  role       = aws_iam_role.Builder.name
-  policy_arn = aws_iam_policy.ReadS3Minimal.arn
-}
 
-resource "aws_iam_role_policy_attachment" "Builder_attach_AmazonSSMManagedInstanceCore" {
-  role       = aws_iam_role.Builder.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
 
 
 resource "aws_security_group" "efs" {
@@ -633,11 +728,11 @@ resource "aws_security_group_rule" "efs_outbound" {
 
 resource "aws_security_group_rule" "efs_inbound" {
   for_each = {
-    "Admin"       = aws_security_group.AdminNode.id,
-    "Compilation" = aws_security_group.CompilerExplorer.id
-    "Builder"     = aws_security_group.Builder.id
-    "CI-x64"      = "sg-07a8509aae61cbe4f"
-    "CI-arm64"    = "sg-0d3a3411b05a2bfb4"
+    "Admin"              = aws_security_group.AdminNode.id,
+    "Compilation"        = aws_security_group.CompilerExplorer.id
+    "CI-x64"             = data.aws_security_group.linux_x64.id
+    "CI-arm64"           = data.aws_security_group.linux_arm64.id
+    "CI-lin-builder-x64" = data.aws_security_group.linux_x64_builder.id
   }
   security_group_id        = aws_security_group.efs.id
   type                     = "ingress"
@@ -666,6 +761,11 @@ resource "aws_iam_role" "CompilerExplorerAdminNode" {
 resource "aws_iam_instance_profile" "CompilerExplorerAdminNode" {
   name = "CompilerExplorerAdminNode"
   role = aws_iam_role.CompilerExplorerAdminNode.name
+}
+
+resource "aws_iam_instance_profile" "CeRouterRole" {
+  name = "CeRouterRole"
+  role = aws_iam_role.CeRouterRole.name
 }
 
 data "aws_iam_policy" "CloudWatchAgentAdminPolicy" {
@@ -715,40 +815,41 @@ resource "aws_iam_role_policy_attachment" "api_gw_logging_policy" {
 }
 
 
-# note: SG mentioned here is created by the ce-ci terraform
+# Look up CI runner security groups created by ce-ci terraform
+data "aws_security_group" "windows_builder" {
+  filter {
+    name   = "tag:ghr:environment"
+    values = ["ce-ci-windows-x64-win-builder"]
+  }
+}
+
+data "aws_security_group" "linux_x64" {
+  filter {
+    name   = "tag:ghr:environment"
+    values = ["ce-ci-linux-x64"]
+  }
+}
+
+data "aws_security_group" "linux_arm64" {
+  filter {
+    name   = "tag:ghr:environment"
+    values = ["ce-ci-linux-arm64"]
+  }
+}
+
+data "aws_security_group" "linux_x64_builder" {
+  filter {
+    name   = "tag:ghr:environment"
+    values = ["ce-ci-linux-x64-builder"]
+  }
+}
 
 resource "aws_security_group_rule" "WinBuilder_SmbLocally" {
   security_group_id        = aws_security_group.CompilerExplorer.id
   type                     = "ingress"
   from_port                = 445
   to_port                  = 445
-  source_security_group_id = "sg-06f4355d49a1e117b"
+  source_security_group_id = data.aws_security_group.windows_builder.id
   protocol                 = "tcp"
-  description              = "Allow SMB access locally"
-}
-
-# note: roles mentioned here are applied by the ce-ci terraform, so comment this out if that is not applied yet
-resource "aws_iam_instance_profile" "WinBuilder" {
-  name = "WinBuilder"
-  role = "ce-ci-windows-x64-win-builder-runner-role"
-}
-
-resource "aws_iam_role_policy_attachment" "WinBuilder_attach_UpdateLibraryBuildHistory" {
-  role       = "ce-ci-windows-x64-win-builder-runner-role"
-  policy_arn = aws_iam_policy.UpdateLibraryBuildHistory.arn
-}
-
-resource "aws_iam_role_policy_attachment" "WinBuilder_attach_AccessCeParams" {
-  role       = "ce-ci-windows-x64-win-builder-runner-role"
-  policy_arn = aws_iam_policy.AccessCeParams.arn
-}
-
-resource "aws_iam_role_policy_attachment" "WinBuilder_attach_ReadS3Minimal" {
-  role       = "ce-ci-windows-x64-win-builder-runner-role"
-  policy_arn = aws_iam_policy.ReadS3Minimal.arn
-}
-
-resource "aws_iam_role_policy_attachment" "WinBuilder_attach_AmazonSSMManagedInstanceCore" {
-  role       = "ce-ci-windows-x64-win-builder-runner-role"
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  description              = "Allow SMB access from Windows builder"
 }

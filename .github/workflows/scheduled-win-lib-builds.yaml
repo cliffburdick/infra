@@ -2,8 +2,8 @@ name: Scheduled Windows Library Builds
 
 on:
   schedule:
-    # Run at 14:52 UTC for testing, then change back to nightly
-    - cron: '52 14 * * *'
+    # Run at 15:00 UTC daily except Sunday
+    - cron: '0 15 * * 1-6'
   workflow_dispatch:
     inputs:
       library_filter:

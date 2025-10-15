@@ -20,7 +20,6 @@ When writing, especially PRs and commit messages:
 - Check code style/linting: `make pre-commit`
 - Install pre-commit hooks: `make install-pre-commit`
 - Build lambda package: `make lambda-package`
-- Build compilation lambda package (Node.js): `make compilation-lambda-package`
 - Build events lambda package: `make events-lambda-package`
 - **NEVER USE THE SYSTEM PYTHON** - always use `uv` to invoke python or pytest or to run experiments with python syntax
 
@@ -32,6 +31,7 @@ When writing, especially PRs and commit messages:
 - For comprehensive validation, run `make static-checks` before committing (includes all linting and type checking)
 - If static checks fail, fix the issues before committing to avoid CI failures
 - **Critical**: After fixing any issues, run `make static-checks` AGAIN. Repeat until it passes completely. Only commit when `make static-checks` runs with zero errors.
+- If a python lint fails **DO NOT DISABLE IT**. The lint rules are there for a reason. You **MUST NOT** override them with `noqa` or similar. If you have no choice **YOU MUST GET EXPLICIT APPROVAL FROM THE USER**.
 
 ### Correct Commit Workflow
 
@@ -84,6 +84,37 @@ When writing, especially PRs and commit messages:
 
 This repository contains scripts and infrastructure configurations for Compiler Explorer.
 Files in `/opt/compiler-explorer` are the target installation location.
+
+## SQS Message Overflow to S3
+
+The CE Router system supports automatic overflow of large compilation requests to S3 when they exceed SQS message size limits.
+
+### Configuration
+
+- **S3 Bucket**: `temp-storage.godbolt.org` (shared across all environments)
+- **Message Storage**: Path pattern `sqs-overflow/{environment}/{timestamp}/{guid}.json`
+- **Automatic Cleanup**: Messages deleted after 1 day (configurable via `sqs_overflow_retention_days` variable)
+- **Server-side Encryption**: AES256 encryption enabled
+
+### Environment Variables
+
+Configure via SSM parameters:
+
+- `SQS_MAX_MESSAGE_SIZE`: Maximum message size before overflow (bytes)
+- `S3_OVERFLOW_BUCKET`: S3 bucket name (default: temp-storage.godbolt.org)
+- `S3_OVERFLOW_KEY_PREFIX`: S3 key prefix (default: sqs-overflow/)
+
+### IAM Permissions
+
+The overflow system grants appropriate S3 permissions to:
+- CE Router instances (write overflow messages)
+- CE instances (read overflow messages)
+- Lambda functions (read/write overflow messages)
+
+### Monitoring
+
+- CloudWatch metric `SQSOverflowMessages` tracks overflow usage
+- CloudWatch alarm triggers when more than 100 messages overflow in 5 minutes
 
 ## Instance Management
 
@@ -200,46 +231,46 @@ The `ce workflows` command group provides functionality to trigger GitHub Action
 
 All workflow trigger commands support `--dry-run` to preview the `gh` command without executing it.
 
-## Compilation Lambda Management
+## CE Router Management
 
-The `ce compilation-lambda` command group provides emergency controls for the compilation Lambda routing system:
+The `ce ce-router` command group provides emergency controls for the CE Router routing system:
 
 ### Available Commands
 
-- **`ce compilation-lambda killswitch ENVIRONMENT`** - EMERGENCY: Disable compilation Lambda ALB routing for an environment
-  - Immediately stops routing compilation requests through Lambda
+- **`ce ce-router disable ENVIRONMENT`** - Disable CE Router ALB routing for an environment
+  - Immediately stops routing compilation requests through CE Router
   - Falls back to legacy instance-based routing within seconds
   - Environments: beta, staging, prod
   - Use `--skip-confirmation` to skip confirmation prompt
-  - Example: `ce compilation-lambda killswitch beta`
+  - Example: `ce ce-router disable beta`
 
-- **`ce compilation-lambda enable ENVIRONMENT`** - Re-enable compilation Lambda ALB routing for an environment
-  - Restores routing of compilation requests through Lambda
+- **`ce ce-router enable ENVIRONMENT`** - Re-enable CE Router ALB routing for an environment
+  - Restores routing of compilation requests through CE Router
   - Takes effect immediately after ALB rule modification
   - Use `--skip-confirmation` to skip confirmation prompt
-  - Example: `ce compilation-lambda enable beta`
+  - Example: `ce ce-router enable beta`
 
-- **`ce compilation-lambda status [ENVIRONMENT]`** - Show current status of compilation Lambda ALB routing
+- **`ce ce-router status [ENVIRONMENT]`** - Show current status of CE Router ALB routing
   - Shows actual ALB listener rule state (not Terraform configuration)
   - Status indicators:
-    - 🟢 ENABLED: Lambda routing active
+    - 🟢 ENABLED: CE Router routing active
     - 🚨 KILLSWITCH ACTIVE: Using instance routing
     - 🔴 NOT_FOUND: No ALB rule exists
   - Without environment argument, shows status for all environments
-  - Example: `ce compilation-lambda status` or `ce compilation-lambda status prod`
+  - Example: `ce ce-router status` or `ce ce-router status prod`
 
 ### Usage Scenarios
 
 **Emergency Response**: Use killswitch when Lambda compilation system is experiencing issues:
 ```bash
-# Disable Lambda routing for production
-ce compilation-lambda killswitch prod
+# Disable CE Router routing for production
+ce ce-router disable prod
 
 # Check status across all environments
-ce compilation-lambda status
+ce ce-router status
 
 # Re-enable when issues are resolved
-ce compilation-lambda enable prod
+ce ce-router enable prod
 ```
 
 ### Technical Details

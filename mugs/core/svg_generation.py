@@ -29,7 +29,7 @@ def svg_to_png(svg_path: str, png_path: str | None = None, dpi: int = DEFAULT_DP
         cairosvg.svg2png(url=svg_path, write_to=png_path, dpi=dpi)
 
         return png_path
-    except Exception as e:
+    except (OSError, ValueError) as e:
         raise RuntimeError(f"Failed to convert SVG to PNG: {e}") from e
 
 
@@ -257,7 +257,7 @@ def create_info_table(
         # Move down by appropriate spacing for next row - look ahead
         if row_idx < len(rows) - 1:  # Not the last row
             next_label, _ = rows[row_idx + 1]
-            if next_label.strip() == "":
+            if not next_label.strip():
                 # Next row is continuation - use less spacing
                 current_y += int(row_height * CONTINUATION_LINE_SPACING)
             else:

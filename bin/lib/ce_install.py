@@ -10,7 +10,7 @@ import os
 import signal
 import sys
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
@@ -41,6 +41,7 @@ class CliContext:
     filter_match_all: bool
     parallel: int
     config: Config
+    _name_to_installable_cache: dict[str, Installable] = field(default_factory=dict, init=False, repr=False)
 
     def pool(self):  # no type hint as mypy freaks out, really a multiprocessing.Pool
         # https://stackoverflow.com/questions/11312525/catch-ctrlc-sigint-and-exit-multiprocesses-gracefully-in-python
@@ -50,12 +51,18 @@ class CliContext:
         signal.signal(signal.SIGINT, original_sigint_handler)
         return pool
 
-    def get_installables(self, args_filter: list[str]) -> list[Installable]:
+    def get_installables(self, args_filter: list[str], bypass_enable_check: bool = False) -> list[Installable]:
+        """Get installables matching the filter.
+
+        Args:
+            args_filter: Filter strings to match installables
+            bypass_enable_check: If True, bypass all 'if:' conditions (nightly, non-free, etc.)
+        """
         installables = []
         for yaml_path in Path(self.installation_context.yaml_dir).glob("*.yaml"):
             with yaml_path.open(encoding="utf-8") as yaml_file:
                 yaml_doc = yaml.load(yaml_file, Loader=ConfigSafeLoader)
-            for installer in installers_for(self.installation_context, yaml_doc, self.enabled):
+            for installer in installers_for(self.installation_context, yaml_doc, bypass_enable_check or self.enabled):
                 installables.append(installer)
         Installable.resolve(installables)
         installables = sorted(
@@ -63,6 +70,32 @@ class CliContext:
             key=lambda x: x.sort_key,
         )
         return installables
+
+    def find_installable_by_exact_name(self, name: str) -> Installable:
+        """Find an installable by its exact name.
+
+        Args:
+            name: The exact name to search for (e.g., "compilers/c++/x86/gcc 14.1.0")
+
+        Returns:
+            The matching Installable object
+
+        Raises:
+            ValueError: If exactly one installable is not found (0 or 2+ matches)
+        """
+        if not self._name_to_installable_cache:
+            # bypass_enable_check=True includes ALL installables regardless of 'if:' conditions
+            # (nightly, non-free, etc). Critical for finding installables that might be
+            # conditionally disabled but still exist on disk (e.g., during consolidation checks)
+            for inst in self.get_installables([], bypass_enable_check=True):
+                if inst.name in self._name_to_installable_cache:
+                    raise ValueError(f"Duplicate installable name found: {inst.name}")
+                self._name_to_installable_cache[inst.name] = inst
+
+        if name not in self._name_to_installable_cache:
+            raise ValueError(f"No installable found with exact name: {name}")
+
+        return self._name_to_installable_cache[name]
 
 
 def _context_match(context_query: str, installable: Installable) -> bool:
@@ -91,7 +124,7 @@ def _context_match(context_query: str, installable: Installable) -> bool:
         return fnmatch.fnmatch(full_path, context_query.lstrip("/"))
 
     context = context_query.split("/")
-    root_only = context[0] == ""
+    root_only = not context[0]
     if root_only:
         context = context[1:]
         return installable.context[: len(context)] == context
@@ -256,7 +289,7 @@ def squash_mount_check(rootfolder: Path, subdir: str, context: CliContext) -> in
                 _LOGGER.error("Missing mount point %s", checkdir)
                 error_count += 1
         else:
-            if subdir == "":
+            if not subdir:
                 error_count += squash_mount_check(rootfolder, filename, context)
             else:
                 error_count += squash_mount_check(rootfolder, f"{subdir}/{filename}", context)
@@ -664,7 +697,7 @@ def squash_check(
 def _should_install(force: bool, installable: Installable) -> tuple[Installable, bool]:
     try:
         return installable, force or installable.should_install()
-    except Exception as ex:
+    except (OSError, RuntimeError) as ex:
         raise RuntimeError(f"Unable to install {installable}") from ex
 
 
@@ -696,7 +729,7 @@ def install(context: CliContext, filter_: list[str], force: bool):
                     else:
                         _LOGGER.info("%s installed OK", installable.name)
                         num_installed += 1
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 _LOGGER.info("%s failed to install: %s\n%s", installable.name, e, traceback.format_exc(5))
                 failed.append(installable.name)
         else:
@@ -707,7 +740,7 @@ def install(context: CliContext, filter_: list[str], force: bool):
         f"{'(apparently; this was a dry-run) ' if context.installation_context.dry_run else ''}OK, "
         f"{num_skipped} skipped, and {len(failed)} failed installation"
     )
-    if len(failed):
+    if failed:
         print("Failed:")
         for f in sorted(failed):
             print(f"  {f}")
@@ -868,6 +901,33 @@ def list_gh_build_commands(context: CliContext, per_lib: bool, filter_: list[str
             shorter_name = installable.name.replace("libraries/c++/", "")
             print(
                 f'gh workflow run win-lib-build.yaml --field "library={shorter_name}" -R github.com/compiler-explorer/infra'
+            )
+
+
+@cli.command(name="list-gh-build-commands-linux")
+@click.pass_obj
+@click.option("--per-lib", is_flag=True, help="Group by library instead of version")
+@click.argument("filter_", metavar="FILTER", nargs=-1)
+def list_gh_build_commands_linux(context: CliContext, per_lib: bool, filter_: list[str]):
+    """List gh workflow commands for Linux builds matching FILTER."""
+    grouped = set()
+
+    if per_lib:
+        for installable in context.get_installables(filter_):
+            if not installable.should_build(LibraryPlatform.Linux):
+                continue
+            shorter_name = installable.name.replace("libraries/c++/", "").split(" ")[0]
+            grouped.add(shorter_name)
+
+        for group in grouped:
+            print(f'gh workflow run lin-lib-build.yaml --field "library={group}" -R github.com/compiler-explorer/infra')
+    else:
+        for installable in context.get_installables(filter_):
+            if not installable.should_build(LibraryPlatform.Linux):
+                continue
+            shorter_name = installable.name.replace("libraries/c++/", "")
+            print(
+                f'gh workflow run lin-lib-build.yaml --field "library={shorter_name}" -R github.com/compiler-explorer/infra'
             )
 
 

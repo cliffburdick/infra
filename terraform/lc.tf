@@ -1,13 +1,14 @@
 locals {
-  prod_image_id           = "ami-00adc60db29e6b1c9"
-  staging_image_id        = "ami-00adc60db29e6b1c9"
-  beta_image_id           = "ami-0a5d26be21ab19c20"
-  gpu_image_id            = "ami-02b97134c4b0683aa"
-  aarch64prod_image_id    = "ami-084b3ad993b0bd6b5"
-  aarch64staging_image_id = "ami-084b3ad993b0bd6b5"
+  prod_image_id           = "ami-07e713f417975e753"
+  staging_image_id        = "ami-07e713f417975e753"
+  beta_image_id           = "ami-07e713f417975e753"
+  gpu_image_id            = "ami-0e9b7b6038861de04"
+  aarch64prod_image_id    = "ami-081acf5f3a2f3679f"
+  aarch64staging_image_id = "ami-081acf5f3a2f3679f"
   winprod_image_id        = "ami-0cf55c2532ef41565"
-  winstaging_image_id     = "ami-0cf55c2532ef41565"
+  winstaging_image_id     = "ami-00ae456840fab5ef7"
   wintest_image_id        = "ami-0807541f025aad832"
+  ce_router_image_id      = "ami-01bf1ab608fbae8bf"
 
   launch_templates = {
     prod = {
@@ -49,6 +50,12 @@ locals {
       image_id      = local.winprod_image_id
       instance_type = "m6i.large"
     }
+
+    // CE Router instances for compilation routing
+    router = {
+      image_id      = local.ce_router_image_id
+      instance_type = "t4g.medium"
+    }
   }
 }
 
@@ -60,7 +67,7 @@ resource "aws_launch_template" "ce" {
   ebs_optimized = true
 
   iam_instance_profile {
-    arn = startswith(each.key, "win") ? aws_iam_instance_profile.CompilerExplorerWindowsRole.arn : aws_iam_instance_profile.CompilerExplorerRole.arn
+    arn = startswith(each.key, "win") ? aws_iam_instance_profile.CompilerExplorerWindowsRole.arn : (each.key == "router" ? aws_iam_instance_profile.CeRouterRole.arn : aws_iam_instance_profile.CompilerExplorerRole.arn)
   }
 
   image_id               = each.value.image_id

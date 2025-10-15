@@ -84,15 +84,15 @@ class BlueGreenDeployment:
             print(f"Restoring original capacity settings for {active_asg}")
             try:
                 restore_asg_capacity_protection(active_asg, active_original_min, active_original_max)
-            except Exception as e:
+            except ClientError as e:
                 LOGGER.warning(f"Failed to restore capacity settings for {active_asg}: {e}")
 
         if inactive_asg:
-            env_min_size = self.cfg.env.min_instances
-            print(f"Resetting minimum size of {inactive_asg} to {env_min_size}")
+            # Reset to 0 since deployment was interrupted (inactive ASG)
+            print(f"Resetting minimum size of {inactive_asg} to 0")
             try:
-                reset_asg_min_size(inactive_asg, min_size=env_min_size)
-            except Exception as e:
+                reset_asg_min_size(inactive_asg, min_size=0)
+            except ClientError as e:
                 LOGGER.warning(f"Failed to reset min size for {inactive_asg}: {e}")
 
         # Rollback version if it was changed
@@ -101,7 +101,7 @@ class BlueGreenDeployment:
             try:
                 set_current_key(self.cfg, original_version_key)
                 print("✓ Version rolled back successfully")
-            except Exception as e:
+            except ClientError as e:
                 LOGGER.error(f"Failed to rollback version: {e}")
                 LOGGER.error(f"You may need to manually set version back to {original_version_key}")
 
@@ -160,7 +160,7 @@ class BlueGreenDeployment:
             return None
 
         # For production, we return the listener ARN itself (to modify default action)
-        if self.cfg.env.path_pattern == "":
+        if not self.cfg.env.path_pattern:
             return https_listeners[0]["ListenerArn"]
 
         # For other environments, find the specific rule for their path pattern
@@ -288,17 +288,15 @@ class BlueGreenDeployment:
         version_was_changed = False
 
         # Update deployment state for signal handler
-        self._deployment_state.update(
-            {
-                "active_asg": active_asg,
-                "inactive_asg": inactive_asg,
-                "active_original_min": None,  # Will be set after protection
-                "active_original_max": None,  # Will be set after protection
-                "in_deployment": True,
-                "original_version_key": None,
-                "version_was_changed": False,
-            }
-        )
+        self._deployment_state.update({
+            "active_asg": active_asg,
+            "inactive_asg": inactive_asg,
+            "active_original_min": None,  # Will be set after protection
+            "active_original_max": None,  # Will be set after protection
+            "in_deployment": True,
+            "original_version_key": None,
+            "version_was_changed": False,
+        })
 
         # Install signal handlers for cleanup
         old_sigint = signal.signal(signal.SIGINT, self._cleanup_on_signal)
@@ -376,7 +374,7 @@ class BlueGreenDeployment:
                                     if not release:
                                         raise RuntimeError(f"Version {version} not found") from None
                                     break
-                                except Exception as copy_error:
+                                except (ClientError, OSError) as copy_error:
                                     LOGGER.error(f"Failed to copy discovery file: {copy_error}")
                                     LOGGER.error("Deployment cancelled due to discovery copy failure.")
                                     raise DeploymentCancelledException("Discovery copy failed") from copy_error
@@ -490,10 +488,13 @@ class BlueGreenDeployment:
             print(f"\nStep 4: Switching traffic to {inactive_color}")
             self.switch_target_group(inactive_color)
 
-            # Step 5: Reset minimum size to environment default now that deployment is complete
-            env_min_size = self.cfg.env.min_instances
-            print(f"\nStep 5: Resetting minimum size of {inactive_asg} to {env_min_size} (environment default)")
-            reset_asg_min_size(inactive_asg, min_size=env_min_size)
+            # Step 5: Reset minimum size to 1 to ensure ASG always has at least one instance
+            # This ensures the active ASG is always ready, regardless of environment defaults
+            min_size_after_deploy = max(1, self.cfg.env.min_instances)
+            print(
+                f"\nStep 5: Resetting minimum size of {inactive_asg} to {min_size_after_deploy} (ensuring at least 1)"
+            )
+            reset_asg_min_size(inactive_asg, min_size=min_size_after_deploy)
 
             # Step 5.5: Reset old active ASG minimum size to 0 (it's now inactive)
             print(f"\nStep 5.5: Resetting minimum size of {active_asg} to 0 (now inactive)")
@@ -519,7 +520,7 @@ class BlueGreenDeployment:
                 print(
                     f"  Compiler routing updated: {result['added']} added, {result['updated']} updated, {result['deleted']} deleted"
                 )
-            except Exception as e:
+            except ClientError as e:
                 LOGGER.warning(f"Failed to update compiler routing table: {e}")
                 LOGGER.warning("Deployment will continue, but compiler routing may be out of date")
                 print(f"  ⚠️  Warning: Compiler routing update failed: {e}")
@@ -537,11 +538,9 @@ class BlueGreenDeployment:
 
             # If deployment failed, also reset the inactive ASG min size
             if not deployment_succeeded:
-                env_min_size = self.cfg.env.min_instances
-                print(
-                    f"\nCleaning up: Resetting minimum size of {inactive_asg} to {env_min_size} after failed deployment"
-                )
-                reset_asg_min_size(inactive_asg, min_size=env_min_size)
+                # Use 0 for failed deployments since it's still inactive
+                print(f"\nCleaning up: Resetting minimum size of {inactive_asg} to 0 after failed deployment")
+                reset_asg_min_size(inactive_asg, min_size=0)
 
                 # Rollback version if it was changed
                 if version_was_changed and original_version_key:
@@ -549,7 +548,7 @@ class BlueGreenDeployment:
                     try:
                         set_current_key(self.cfg, original_version_key)
                         print("✓ Version rolled back successfully")
-                    except Exception as e:
+                    except ClientError as e:
                         LOGGER.error(f"Failed to rollback version: {e}")
                         LOGGER.error(f"You may need to manually set version back to {original_version_key}")
 
@@ -650,7 +649,7 @@ class BlueGreenDeployment:
                             tg_status = "partially_healthy"
                         else:
                             tg_status = "unhealthy"
-                    except Exception:
+                    except ClientError:
                         tg_status = "error"
 
                     # Get HTTP health checks for instances

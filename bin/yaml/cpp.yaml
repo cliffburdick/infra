@@ -1193,6 +1193,7 @@ compilers:
           - 1.10-clang-20.1.0
           - 2.0-clang-20.1.0
           - 2.1-clang-21.1.0
+          - 2.2-clang-21.1.0
         nightly:
           if: nightly
           subdir: clang-plugins
@@ -1233,6 +1234,10 @@ compilers:
             edg_version: '6.7'
             depends:
               - compilers/c++/x86/gcc 14.2.0
+          - name: 6.8-default-15
+            edg_version: '6.8'
+            depends:
+              - compilers/c++/x86/gcc 15.2.0
       gcc:
         compiler_type: gcc
         macro_output_dir: base/lib
@@ -1252,11 +1257,16 @@ compilers:
             macro_gen: edg-compiler/make_predef_macro_table_v1
             depends:
               - compilers/c++/x86/gcc 14.2.0
+          - name: 6.8-gcc-15
+            edg_version: '6.8'
+            macro_gen: edg-compiler/make_predef_macro_table_v1
+            depends:
+              - compilers/c++/x86/gcc 15.2.0
           - name: gcc-experimental-reflection
             edg_version: 'experimental-reflection'
             macro_gen: edg-compiler/make_predef_macro_table_v1
             depends:
-              - compilers/c++/x86/gcc 13.2.0
+              - compilers/c++/x86/gcc 15.2.0
     ellccs:
       check_exe: bin/clang++ --version
       dir: ellcc-{{name}}
@@ -1418,6 +1428,16 @@ compilers:
           check_exe: compiler/latest/bin/icx -V
           fetch:
             - https://registrationcenter-download.intel.com/akdlm/IRC_NAS/04c5fd98-57e6-4a4b-be4d-e84de3aea45a/intel-dpcpp-cpp-compiler-{{name}}_offline.sh install.sh
+          script: *intel-one-install-script
+        - name: 2025.3.0.322
+          check_exe: compiler/latest/bin/icx -V
+          fetch:
+            - https://registrationcenter-download.intel.com/akdlm/IRC_NAS/44809add-596f-4484-9cd1-cc032460e241/intel-dpcpp-cpp-compiler-{{name}}_offline.sh install.sh
+          script: *intel-one-install-script
+        - name: 2025.3.1.16
+          check_exe: compiler/latest/bin/icx -V
+          fetch:
+            - https://registrationcenter-download.intel.com/akdlm/IRC_NAS/5adfc398-db78-488c-b98f-78461b3c5760/intel-dpcpp-cpp-compiler-{{name}}_offline.sh install.sh
           script: *intel-one-install-script
 
     nvhpc-sdk:
@@ -1609,6 +1629,22 @@ compilers:
           ctk_ver: "13.0"
           fetch:
             - https://developer.download.nvidia.com/hpc-sdk/{{version}}/nvhpc_{{year}}_{{dot_removed_version}}_Linux_{{arch}}_cuda_{{ctk_ver}}.tar.gz nvhpc_sdk_{{version}}_{{arch}}.tar.gz
+        - name: x86_64_25_11
+          arch: x86_64
+          version: "25.11"
+          dot_removed_version: "2511"
+          year: "2025"
+          ctk_ver: "13.0"
+          fetch:
+            - https://developer.download.nvidia.com/hpc-sdk/{{version}}/nvhpc_{{year}}_{{dot_removed_version}}_Linux_{{arch}}_cuda_{{ctk_ver}}.tar.gz nvhpc_sdk_{{version}}_{{arch}}.tar.gz
+        - name: x86_64_26_1
+          arch: x86_64
+          version: "26.1"
+          dot_removed_version: "261"
+          year: "2026"
+          ctk_ver: "13.1"
+          fetch:
+            - https://developer.download.nvidia.com/hpc-sdk/{{version}}/nvhpc_{{year}}_{{dot_removed_version}}_Linux_{{arch}}_cuda_{{ctk_ver}}.tar.gz nvhpc_sdk_{{version}}_{{arch}}.tar.gz
     nightly:
       if: nightly
       gcc:
@@ -1624,6 +1660,11 @@ compilers:
           - lock3-contracts-trunk
           - lock3-contract-labels-trunk
           - p1144-trunk
+          - reflection-trunk
+          - contracts-base-trunk
+          - contracts-GNUext-trunk
+          - thomas-healy-trunk
+          - trivial-relocation-trunk
       clang:
         type: nightly
         check_exe: bin/clang++ --version
@@ -1649,15 +1690,20 @@ compilers:
           - rocm-trunk
           - ce-trunk
           - clangir-trunk
+          - p2561-trunk
           - bb-p2996-trunk
           - p2998-trunk
+          - p3039-trunk
           - p3068-trunk
           - p3309-trunk
+          - p3334-trunk
           - p3367-trunk
           - p3372-trunk
           - p3385-trunk
           - p3412-trunk
           - p3776-trunk
+          - p3951-trunk
+          - hana-clang-trunk
           - implicit-constexpr-trunk
           - dascandy-contracts-trunk
           - p1974-trunk
@@ -1674,6 +1720,12 @@ compilers:
       tinycc:
         type: nightly
         check_exe: bin/tcc -v
+        targets:
+          - trunk
+      ncc-ng:
+        type: nightly
+        compiler_name: ncc-ng-{{name}}
+        check_exe: bin/n++ -help
         targets:
           - trunk
       6502-c++:

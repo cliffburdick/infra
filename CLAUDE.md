@@ -237,6 +237,26 @@ The `ce ce-router` command group provides emergency controls for the CE Router r
 
 ### Available Commands
 
+- **`ce ce-router exec_all REMOTE_CMD`** - Execute commands on all CE Router instances
+  - Runs the specified command on all CE Router instances in the current environment
+  - Requires confirmation before execution
+  - Example: `ce --env prod ce-router exec_all uptime`
+  - Example: `ce --env prod ce-router exec_all cat /infra/.deploy/ce-router-version`
+
+- **`ce ce-router version`** - Show installed CE Router version on all instances
+  - Displays the version from `/infra/.deploy/ce-router-version` on each instance
+  - Example: `ce --env prod ce-router version`
+
+- **`ce ce-router refresh`** - Refresh CE Router instances with latest version
+  - Performs a rolling instance refresh via AWS Auto Scaling Group
+  - Launches new instances, waits for health checks, then terminates old instances
+  - Maintains minimum healthy percentage during update (default: 75%)
+  - Monitors progress and shows completion status
+  - Use `--min-healthy-percent` to adjust safety threshold
+  - Use `--skip-confirmation` to skip confirmation prompt
+  - Example: `ce --env prod ce-router refresh`
+  - Example: `ce --env prod ce-router refresh --min-healthy-percent 90`
+
 - **`ce ce-router disable ENVIRONMENT`** - Disable CE Router ALB routing for an environment
   - Immediately stops routing compilation requests through CE Router
   - Falls back to legacy instance-based routing within seconds
@@ -258,6 +278,27 @@ The `ce ce-router` command group provides emergency controls for the CE Router r
     - 🔴 NOT_FOUND: No ALB rule exists
   - Without environment argument, shows status for all environments
   - Example: `ce ce-router status` or `ce ce-router status prod`
+
+### Version Management
+
+CE Router software is downloaded from GitHub releases on instance startup. The installed version is saved to `/infra/.deploy/ce-router-version`.
+
+**Check installed version**:
+```bash
+ce --env prod ce-router exec_all cat /infra/.deploy/ce-router-version
+```
+
+**Check latest available version**:
+```bash
+ce --env prod ce-router exec_all "curl -s https://api.github.com/repos/compiler-explorer/ce-router/releases/latest | jq -r '.tag_name'"
+```
+
+**Update to latest version**:
+```bash
+ce --env prod ce-router refresh
+```
+
+This performs a rolling update, launching new instances with the latest CE Router version from GitHub releases, then terminating old instances once the new ones are healthy.
 
 ### Usage Scenarios
 
@@ -324,6 +365,27 @@ The `ce compiler-routing` command group provides functionality to manage compile
 
 - **Queue Environments**: prod, staging, beta → Route to SQS queues
 - **URL Environments**: winprod, winstaging, wintest, gpu, aarch64prod, aarch64staging, runner → Forward directly to environment URLs
+
+## Go Standard Library Management
+
+### Automatic Building During Installation
+
+When installing Go compilers using the `go` installer type (configured in `bin/yaml/go.yaml`), the standard library is automatically built during the staging phase:
+
+- Default architectures: `linux/amd64`, `linux/arm64`
+- Cache directory: `<go-installation>/cache`
+- Marker files: `.built_linux_amd64`, `.built_linux_arm64` (stored in cache directory)
+- Controlled by YAML properties:
+  - `build_stdlib: true/false` - Enable/disable automatic building (default: true)
+  - `build_stdlib_archs: [...]` - List of architectures to build
+
+### Architecture
+
+- Standard library cache is stored in `cache` subdirectory of Go installation
+- Per-architecture marker files track build status (e.g., `.built_linux_amd64`)
+- Builds use Go's native `go build std` command with `GOCACHE` environment variable
+- Builds are idempotent: existing builds are detected via marker files
+- Core logic in `bin/lib/golang_stdlib.py`, installer in `bin/lib/installable/go.py`
 
 ## AWS Integration Pattern
 

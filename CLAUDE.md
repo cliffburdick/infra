@@ -42,6 +42,11 @@ When writing, especially PRs and commit messages:
 5. Repeat steps 3-4 until `make static-checks` passes completely
 6. Only then create the commit
 
+### Git Best Practices
+
+- Do not use `git push --force` or `git commit --amend` unless explicitly asked
+- Make regular commits for fixes rather than rewriting history
+
 ## Code Style Guidelines
 
 - Python formatting: Black with 120 char line length
@@ -569,6 +574,10 @@ Send 'now live' notifications to GitHub issues/PRs? [yes/dry-run/no] (yes):
 ## CE Install Filter System
 
 The `ce_install` command supports a filter system to narrow down installables. Filter syntax and usage patterns are documented in `docs/filter-system.md`.
+
+## Library Configuration
+
+Library YAML settings, build types, library types (`cshared`, `shared`, `static`, `headeronly`), `package_install` behavior, and per-language configuration are documented in `docs/library_configuration.md`.
 
 ## Terraform Integration
 

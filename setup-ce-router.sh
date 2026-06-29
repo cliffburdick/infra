@@ -20,11 +20,11 @@ apt-get -y install \
     jq \
     nginx
 
-# Install Node.js 22.x (matching Lambda runtime)
+# Install Node.js (arm64 build matches the Lambda runtime major)
 pushd /opt
-TARGET_NODE_VERSION=v22.13.1
+TARGET_NODE_VERSION="v$(cat "${DIR}/node-version")"
 echo "Installing node ${TARGET_NODE_VERSION}"
-curl -sL "https://nodejs.org/dist/${TARGET_NODE_VERSION}/node-${TARGET_NODE_VERSION}-linux-arm64.tar.xz" | tar xJf - && mv node-${TARGET_NODE_VERSION}-linux-arm64 node
+curl -sL "https://nodejs.org/dist/${TARGET_NODE_VERSION}/node-${TARGET_NODE_VERSION}-linux-arm64.tar.xz" | tar xJf - && mv "node-${TARGET_NODE_VERSION}-linux-arm64" node
 popd
 
 
@@ -52,13 +52,12 @@ echo -e "[default]\nregion=us-east-1" > /home/ce/.aws/config
 chown -R ce:ce /home/ce/.aws
 
 # Memory and network optimizations
-if ! grep vm.min_free_kbytes /etc/sysctl.conf; then
-  {
-    echo "vm.min_free_kbytes=65536"
-    echo "net.core.rmem_max=268435456"
-    echo "net.core.wmem_max=268435456"
-    echo "net.ipv4.tcp_rmem=4096 65536 268435456"
-    echo "net.ipv4.tcp_wmem=4096 65536 268435456"
-  } >>/etc/sysctl.conf
-  sysctl -p
-fi
+mkdir -p /etc/sysctl.d
+cat >/etc/sysctl.d/99-ce.conf <<EOF
+vm.min_free_kbytes=65536
+net.core.rmem_max=268435456
+net.core.wmem_max=268435456
+net.ipv4.tcp_rmem=4096 65536 268435456
+net.ipv4.tcp_wmem=4096 65536 268435456
+EOF
+sysctl -p /etc/sysctl.d/99-ce.conf

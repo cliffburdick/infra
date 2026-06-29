@@ -27,6 +27,7 @@ apt-get install -y \
     libdatetime-perl \
     libelf-dev \
     libgmp3-dev \
+    libnginx-mod-http-brotli-filter \
     libnl-route-3-dev \
     libpciaccess0 \
     libprotobuf-dev \
@@ -73,9 +74,9 @@ popd
 
 pushd /opt
 # node.js
-TARGET_NODE_VERSION=v22.13.1
+TARGET_NODE_VERSION="v$(cat "${DIR}/node-version")"
 echo "Installing node ${TARGET_NODE_VERSION}"
-curl -sL "https://nodejs.org/dist/${TARGET_NODE_VERSION}/node-${TARGET_NODE_VERSION}-linux-arm64.tar.xz" | tar xJf - && mv node-${TARGET_NODE_VERSION}-linux-arm64 node
+curl -sL "https://nodejs.org/dist/${TARGET_NODE_VERSION}/node-${TARGET_NODE_VERSION}-linux-arm64.tar.xz" | tar xJf - && mv "node-${TARGET_NODE_VERSION}-linux-arm64" node
 popd
 
 cp nginx/nginx.conf /etc/nginx/nginx.conf

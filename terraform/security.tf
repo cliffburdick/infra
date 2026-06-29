@@ -312,7 +312,10 @@ data "aws_iam_policy_document" "ScanLibraryBuildHistory" {
       "dynamodb:Scan",
       "dynamodb:Query"
     ]
-    resources = [aws_dynamodb_table.library-build-history.arn]
+    resources = [
+      aws_dynamodb_table.library-build-history.arn,
+      "${aws_dynamodb_table.library-build-history.arn}/index/*",
+    ]
   }
 }
 
@@ -733,6 +736,8 @@ resource "aws_security_group_rule" "efs_inbound" {
     "CI-x64"             = data.aws_security_group.linux_x64.id
     "CI-arm64"           = data.aws_security_group.linux_arm64.id
     "CI-lin-builder-x64" = data.aws_security_group.linux_x64_builder.id
+    "CI-x64-small"       = data.aws_security_group.linux_x64_small.id
+    "CI-x64-medium"      = data.aws_security_group.linux_x64_medium.id
   }
   security_group_id        = aws_security_group.efs.id
   type                     = "ingress"
@@ -844,6 +849,20 @@ data "aws_security_group" "linux_x64_builder" {
   }
 }
 
+data "aws_security_group" "linux_x64_small" {
+  filter {
+    name   = "tag:ghr:environment"
+    values = ["ce-ci-linux-x64-small"]
+  }
+}
+
+data "aws_security_group" "linux_x64_medium" {
+  filter {
+    name   = "tag:ghr:environment"
+    values = ["ce-ci-linux-x64-medium"]
+  }
+}
+
 resource "aws_security_group_rule" "WinBuilder_SmbLocally" {
   security_group_id        = aws_security_group.CompilerExplorer.id
   type                     = "ingress"
@@ -852,4 +871,36 @@ resource "aws_security_group_rule" "WinBuilder_SmbLocally" {
   source_security_group_id = data.aws_security_group.windows_builder.id
   protocol                 = "tcp"
   description              = "Allow SMB access from Windows builder"
+}
+
+# Read-only IAM user for Molty (AI assistant) to monitor CE infrastructure and AWS usage.
+# Grants read-only access to EC2, ALB/ELB, AutoScaling, CloudWatch, Billing, SQS, and S3, with no write permissions.
+# Access key is managed outside Terraform.
+# force_destroy allows terraform destroy to succeed even if an access key exists.
+resource "aws_iam_user" "molty" {
+  name          = "molty"
+  force_destroy = true
+  tags = {
+    Description = "Read-only monitoring user for Molty AI assistant"
+  }
+}
+
+locals {
+  molty_readonly_policy_arns = toset([
+    "arn:aws:iam::aws:policy/AWSBillingReadOnlyAccess",
+    "arn:aws:iam::aws:policy/AmazonDynamoDBReadOnlyAccess",
+    "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess",
+    "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
+    "arn:aws:iam::aws:policy/AmazonSQSReadOnlyAccess",
+    "arn:aws:iam::aws:policy/AutoScalingReadOnlyAccess",
+    "arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess",
+    "arn:aws:iam::aws:policy/ElasticLoadBalancingReadOnly",
+  ])
+}
+
+resource "aws_iam_user_policy_attachment" "molty_readonly" {
+  for_each = local.molty_readonly_policy_arns
+
+  user       = aws_iam_user.molty.name
+  policy_arn = each.value
 }

@@ -1,9 +1,8 @@
 name: CEFS consolidation
 
 on:
-  # TODO: enable
-  # schedule:
-  #   - cron: '15 6 * * *'
+  schedule:
+    - cron: '15 7 * * *'
   workflow_dispatch:
     inputs:
       filter:
@@ -17,14 +16,14 @@ on:
 jobs:
   consolidate:
     if: github.repository == 'compiler-explorer/infra'
-    runs-on: [ 'self-hosted', 'ce', 'linux', 'x64' ]
+    runs-on: [ 'self-hosted', 'ce', 'linux', 'x64', 'medium' ]
     steps:
-      - name: Start from a clean directory
-        uses: AutoModality/action-clean@v1.1.0
-      - uses: actions/checkout@v4
+      - name: Clean workspace
+        run: find "$GITHUB_WORKSPACE" -mindepth 1 -delete
+      - uses: actions/checkout@v5
       - name: Set up environment
         run: make ce
       - name: Consolidate ${{ github.event.inputs.filter }} into ${{ github.event.inputs.max-size }} chunks
         # TODO: finally sort out permissions for this. I hate sudo
         # TODO: remote `--debug` once we're happy
-        run: sudo bin/ce_install --debug cefs consolidate --reconsolidate --max-size ${{ github.event.inputs.max-size }} ${{ github.event.inputs.filter }}
+        run: sudo bin/ce_install --debug cefs consolidate --reconsolidate --max-size ${{ github.event.inputs.max-size || '20G' }} ${{ github.event.inputs.filter }}

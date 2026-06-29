@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       library_filter:
-        description: 'Library filter (default: libraries/c++ libraries/rust libraries/fortran libraries/go)'
+        description: 'Library filter (default: libraries/c++ libraries/cuda libraries/rust libraries/fortran libraries/go)'
         required: false
-        default: 'libraries/c++ libraries/rust libraries/fortran libraries/go'
+        default: 'libraries/c++ libraries/cuda libraries/rust libraries/fortran libraries/go'
         type: string
 
 jobs:
@@ -20,7 +20,7 @@ jobs:
       libraries: ${{ steps.get-libs.outputs.libraries }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python environment
         run: make ce
@@ -28,7 +28,7 @@ jobs:
       - name: Get list of libraries to build
         id: get-libs
         run: |
-          FILTER="${{ github.event.inputs.library_filter || 'libraries/c++ libraries/rust libraries/fortran libraries/go' }}"
+          FILTER="${{ github.event.inputs.library_filter || 'libraries/c++ libraries/cuda libraries/rust libraries/fortran libraries/go' }}"
 
           # Get the library names from all specified filters, with --per-lib for deduplication
           LIBS=""

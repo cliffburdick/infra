@@ -4,7 +4,6 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
-import logging.config
 import multiprocessing
 import os
 import signal
@@ -465,7 +464,7 @@ def cli(
 
 
 # Import CLI modules to register commands
-from lib.cli import cefs, cpp_libraries, fortran_libraries  # noqa: F401, E402
+from lib.cli import cefs, conan_builds, cpp_libraries, fortran_libraries  # noqa: F401, E402
 
 
 def get_exe_path_for_installable(installable, destination) -> str | None:
@@ -736,11 +735,15 @@ def squash_check(
         sys.exit(0)
 
 
-def _should_install(force: bool, installable: Installable) -> tuple[Installable, bool]:
+def should_install_helper(force: bool, installable: Installable) -> tuple[Installable, bool]:
     try:
         return installable, force or installable.should_install()
     except (OSError, RuntimeError) as ex:
-        raise RuntimeError(f"Unable to install {installable}") from ex
+        # Don't let a failed up-to-date check abort the whole run: assume it needs installing so the
+        # failure surfaces per-item in the install loop (and is reported in the final summary) rather
+        # than killing the batch here inside pool.map.
+        _LOGGER.error("Error checking whether to install %s, will attempt anyway: %s", installable, ex)
+        return installable, True
 
 
 @cli.command()
@@ -754,7 +757,7 @@ def install(context: CliContext, filter_: list[str], force: bool):
     failed = []
 
     with context.pool() as pool:
-        to_do = pool.map(partial(_should_install, force), context.get_installables(filter_))
+        to_do = pool.map(partial(should_install_helper, force), context.get_installables(filter_))
 
     for installable, should_install in to_do:
         print(f"Installing {installable.name}")
@@ -977,6 +980,28 @@ def list_gh_build_commands_linux(context: CliContext, per_lib: bool, filter_: li
             print(
                 f'gh workflow run lin-lib-build.yaml --field "library={shorter_name}" -R github.com/compiler-explorer/infra'
             )
+
+
+@cli.command()
+@click.pass_obj
+def validate(context: CliContext):
+    """Validate YAML configurations produce valid installables."""
+    num_targets = 0
+    errors = []
+    for yaml_path in sorted(Path(context.installation_context.yaml_dir).glob("*.yaml")):
+        with yaml_path.open(encoding="utf-8") as yaml_file:
+            yaml_doc = yaml.load(yaml_file, Loader=ConfigSafeLoader)
+        try:
+            for _ in installers_for(context.installation_context, yaml_doc, True, validate_only=True):
+                num_targets += 1
+        except (AssertionError, RuntimeError) as e:
+            errors.append(f"{yaml_path.name}: {e}")
+    if errors:
+        for error in errors:
+            print(f"ERROR: {error}")
+        print(f"Validation failed with {len(errors)} error(s)")
+        sys.exit(1)
+    print(f"Validation passed: {num_targets} targets OK")
 
 
 @cli.command()

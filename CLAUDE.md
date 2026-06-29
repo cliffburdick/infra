@@ -23,6 +23,10 @@ When writing, especially PRs and commit messages:
 - Build events lambda package: `make events-lambda-package`
 - **NEVER USE THE SYSTEM PYTHON** - always use `uv` to invoke python or pytest or to run experiments with python syntax
 
+## Documentation
+
+This repository has extensive documentation in the `docs/` directory. Before making changes to a subsystem, read the relevant documentation first. Existing CLI commands, library configuration, and infrastructure patterns are already documented -- don't reinvent or guess at behavior that's written down.
+
 ## Important Workflow Requirements
 
 - ALWAYS run pre-commit hooks before committing: `make pre-commit`
@@ -51,7 +55,6 @@ When writing, especially PRs and commit messages:
 
 - Python formatting: Black with 120 char line length
 - Use type hints for Python code (mypy for validation)
-  - All Python files must include `from __future__ import annotations` at the top (after docstring)
   - Use modern Python 3.9+ typing syntax: `list[str]`, `dict[str, Any]`, `str | None` instead of `Optional[str]`
   - Only import `Any` from `typing` module when needed; use built-in types otherwise
   - Union types: use `X | Y` syntax instead of `Union[X, Y]`
@@ -159,6 +162,19 @@ Use instance isolation when you need to:
 - Analyze core dumps or logs
 - Test fixes before applying to all instances
 
+## GPU Runner Management
+
+The `ce gpu-runner` command group manages the GPU runner instance (CEGPURunner, g4dn.xlarge) used for GPU compiler discovery:
+
+- **`ce gpu-runner start`** - Start the GPU runner, wait for SSH and boot completion
+- **`ce gpu-runner stop`** - Stop the GPU runner instance
+- **`ce gpu-runner status`** - Show instance state
+- **`ce gpu-runner login`** - SSH into the GPU runner
+- **`ce gpu-runner exec REMOTE_CMD`** - Execute a command on the GPU runner
+- **`ce gpu-runner pull`** - Git pull infra on the GPU runner
+- **`ce gpu-runner discovery`** - Run compiler discovery on the GPU runner
+- **`ce gpu-runner uploaddiscovery gpu VERSION`** - Download, validate, and upload discovery JSON to S3
+
 ## CLI Architecture
 
 The CLI system (`bin/ce`) uses Click framework with a modular command structure:
@@ -194,6 +210,16 @@ The CLI system (`bin/ce`) uses Click framework with a modular command structure:
        """Subcommand description."""
    ```
 
+## Admin Instance
+
+The admin instance runs fish as its default shell, so `ce` is not in its path. Use the full path when running commands remotely:
+
+```bash
+bin/ce admin exec /home/ubuntu/infra/bin/ce conan restart
+```
+
+After restarting the conan proxy, wait ~10 seconds before making requests to it -- it returns 502 while starting up.
+
 ## GitHub Workflow Integration
 
 The `ce workflows` command group provides functionality to trigger GitHub Actions workflows:
@@ -205,6 +231,12 @@ The `ce workflows` command group provides functionality to trigger GitHub Action
   - Override with `--environment`, `--branch`, `--skip-remote-checks`
   - Use `--wait` to wait for workflow completion
   - Example: `ce workflows run-discovery gh-12345 --environment prod --wait`
+
+- **`ce workflows run-gpu-discovery BUILDNUMBER`** - Trigger GPU compiler discovery workflow in infra repo
+  - Always targets the GPU environment
+  - Override with `--branch`
+  - Use `--wait` to wait for workflow completion
+  - Example: `ce workflows run-gpu-discovery gh-12345 --wait`
 
 - **`ce workflows deploy-win BUILDNUMBER`** - Trigger Windows deployment in main compiler-explorer repo
   - Uses defaults: main branch
@@ -476,7 +508,7 @@ my_client.some_method()  # Client is initialized on first use
 
 The codebase supports multiple environments defined in `lib/env.py`:
 - `PROD`, `BETA`, `STAGING` - Main environments
-- `GPU`, `RUNNER` - Specialized environments
+- `GPU`, `GPU_RUNNER`, `RUNNER` - Specialized environments
 - `WINPROD`, `WINSTAGING`, `WINTEST` - Windows environments
 - `AARCH64PROD`, `AARCH64STAGING` - ARM environments
 
@@ -578,6 +610,16 @@ The `ce_install` command supports a filter system to narrow down installables. F
 ## Library Configuration
 
 Library YAML settings, build types, library types (`cshared`, `shared`, `static`, `headeronly`), `package_install` behavior, and per-language configuration are documented in `docs/library_configuration.md`.
+
+## Library Build Status Management
+
+The `ce_install build-status` command group manages build failure records on the Conan proxy server. Failed builds are tracked so they are not re-attempted; these commands allow clearing that status.
+
+- **`ce_install build-status list-failed`** - List failed builds (requires at least one of `--library` or `--compiler-version`; optional `--version` to filter by library version)
+- **`ce_install build-status clear-for-library LIBRARY [--version VERSION]`** - Clear failures for a library
+- **`ce_install build-status clear-for-compiler COMPILER_VERSION`** - Clear failures for a compiler (e.g. `g141`, `clang1400`)
+
+See the Build Failure Tracking section in `docs/library_configuration.md` for details.
 
 ## Terraform Integration
 

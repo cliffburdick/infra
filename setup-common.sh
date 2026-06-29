@@ -38,6 +38,38 @@ apt-get -y install \
 
 locale-gen en_US.UTF-8
 
+# Install user-requested locales
+cat >> /etc/locale.gen << EOF
+cs_CZ.UTF-8 UTF-8
+cs_CZ ISO-8859-2
+en_GB ISO-8859-1
+de_DE.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+en_US.UTF-8 UTF-8
+en_US ISO-8859-1
+en_US.ISO-8859-15 ISO-8859-15
+is_IS.UTF-8 UTF-8
+ja_JP.UTF-8 UTF-8
+ja_JP.EUC-JP EUC-JP
+ja_JP.SHIFT_JIS SHIFT_JIS
+lt_LT.UTF-8 UTF-8
+lt_LT ISO-8859-13
+ru_RU.UTF-8 UTF-8
+sv_SE.UTF-8 UTF-8
+th_TH.UTF-8 UTF-8
+th_TH TIS-620
+zh_CN.UTF-8 UTF-8
+zh_CN.GB18030 GB18030
+zh_CN.GBK GBK
+zh_CN GB2312
+zh_HK.UTF-8 UTF-8
+zh_HK BIG5-HKSCS
+zh_TW.UTF-8 UTF-8
+zh_TW.EUC-TW EUC-TW
+zh_TW BIG5
+EOF
+locale-gen
+
 apt-get autoremove --purge -y
 
 # This returns amd64 or arm64
@@ -61,6 +93,21 @@ mkdir -p /root/.aws /home/ubuntu/.aws
 echo -e "[default]\nregion=us-east-1" | tee /root/.aws/config /home/ubuntu/.aws/config
 chown -R ubuntu /home/ubuntu/.aws
 
+# GHC (8.6.1 and others) and some other legacy toolchains link against
+# libtinfo.so.5, which Ubuntu 24.04 no longer packages. Pull our mirror of the
+# jammy package and install it next to the v6 that ships by default. amd64 only
+# for now; revisit arm64 if a compiler there ends up needing it.
+if [ "$ARCH" == 'amd64' ]; then
+  mkdir -p /tmp/libtinfo5
+  pushd /tmp/libtinfo5
+  aws s3 cp s3://compiler-explorer/dependencies/libtinfo5_6.3-2ubuntu0.1_amd64.deb libtinfo5.deb
+  dpkg-deb -x libtinfo5.deb extracted
+  cp -a extracted/lib/x86_64-linux-gnu/libtinfo.so.5* /usr/lib/x86_64-linux-gnu/
+  ldconfig
+  popd
+  rm -rf /tmp/libtinfo5
+fi
+
 get_conf() {
   aws ssm get-parameter --name "$1" | jq -r .Parameter.Value
 }
@@ -72,7 +119,15 @@ LOG_DEST_PORT_PARAM="${LOG_DEST_PORT_PARAM:-/compiler-explorer/logDestPort}"
 LOG_DEST_HOST=$(get_conf "${LOG_DEST_HOST_PARAM}")
 LOG_DEST_PORT=$(get_conf "${LOG_DEST_PORT_PARAM}")
 PTRAIL='/etc/rsyslog.d/99-papertrail.conf'
-echo "*.*          @${LOG_DEST_HOST}:${LOG_DEST_PORT}" >"${PTRAIL}"
+cat >"${PTRAIL}" <<RSYSLOG_EOF
+# Don't forward rsyslog's own local-write-failure messages. With a full disk,
+# every failed write to /var/log/* generates more of them (including for the
+# failures they themselves cause), flooding the remote destination at hundreds
+# of thousands of messages per minute and exhausting the log quota.
+# See https://github.com/compiler-explorer/compiler-explorer/issues/8811
+if \$programname == 'rsyslogd' and (\$msg contains 'write error' or \$msg contains 'message lost' or \$msg contains 'messages lost') then stop
+*.*          @${LOG_DEST_HOST}:${LOG_DEST_PORT}
+RSYSLOG_EOF
 service rsyslog restart
 pushd /tmp
 
@@ -117,42 +172,10 @@ systemctl enable remote-syslog
 cp /infra/init/log-instance-id.service /lib/systemd/system/log-instance-id.service
 systemctl enable log-instance-id
 
-setup_grafana() {
-    local GRAFANA_CONFIG=/infra/grafana/agent.yaml
-    local GRAFANA_VERSION=0.41.1
-
-    pushd /tmp
-    curl -sLo agent-linux.zip "https://github.com/grafana/agent/releases/download/v${GRAFANA_VERSION}/grafana-agent-linux-${ARCH}.zip"
-    unzip agent-linux.zip
-    cp "grafana-agent-linux-${ARCH}" /usr/local/bin/grafana-agent
-    popd
-
-    local PROM_PASSWORD
-    local LOKI_PASSWORD
-    PROM_PASSWORD=$(get_conf /compiler-explorer/promPassword)
-    LOKI_PASSWORD=$(get_conf /compiler-explorer/lokiPassword)
-    mkdir -p /etc/grafana
-    cp $GRAFANA_CONFIG /etc/grafana/agent.yaml.tpl
-    sed -i "s/@PROM_PASSWORD@/${PROM_PASSWORD}/g" /etc/grafana/agent.yaml.tpl
-    sed -i "s/@LOKI_PASSWORD@/${LOKI_PASSWORD}/g" /etc/grafana/agent.yaml.tpl
-    chmod 600 /etc/grafana/agent.yaml.tpl
-    if [ "${INSTALL_TYPE}" = "ci" ]; then
-      cp /infra/grafana/make-config-ci.sh /etc/grafana/make-config.sh
-    elif [ "${INSTALL_TYPE}" = "admin" ]; then
-      cp /infra/grafana/make-config-admin.sh /etc/grafana/make-config.sh
-    else
-      cp /infra/grafana/make-config.sh /etc/grafana/make-config.sh
-    fi
-
-    cp /infra/grafana/update-metrics.sh /etc/grafana/update-metrics.sh
-    cp /infra/grafana/ce-metrics.service /lib/systemd/system/ce-metrics.service
-    cp /infra/grafana/grafana-agent.service /lib/systemd/system/grafana-agent.service
-
-    systemctl daemon-reload
-    systemctl enable ce-metrics
-    systemctl enable grafana-agent
-}
-setup_grafana
+# The default exclude regex ('^/.+$') keeps the legacy "/-only" behaviour for
+# nodes that have no real data mount. Hosts with extra data mounts (e.g.
+# conan-node) call install-agent.sh themselves with FS_IGNORE set.
+INSTALL_TYPE="${INSTALL_TYPE}" /infra/grafana/install-agent.sh
 
 # Skip NFS setup if SKIP_NFS_SETUP is set
 if [ "${SKIP_NFS_SETUP:-}" != "1" ]; then

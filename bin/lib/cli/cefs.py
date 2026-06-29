@@ -8,6 +8,7 @@ import logging
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from lib.cefs.formatting import (
     get_installable_current_locations,
 )
 from lib.cefs.fsck import FSCKResults, run_fsck_validation
-from lib.cefs.gc import delete_image_with_manifest, filter_images_by_age
+from lib.cefs.gc import cleanup_bak_items, delete_image_with_manifest, filter_images_by_age, find_bak_candidates
 from lib.cefs.paths import (
     FileWithAge,
     get_cefs_mount_path,
@@ -595,8 +596,46 @@ def consolidate(
 
         if recon_candidates:
             _LOGGER.info("Found %d items from consolidated images for reconsolidation", len(recon_candidates))
-            # Reconsolidation candidates are already in the right format
-            cefs_items.extend(recon_candidates)
+            # Filter out reconsolidation candidates whose name already appears as a fresh item.
+            # If both a fresh item and a reconsolidation item have the same name they would
+            # produce the same sanitized subdir_name and race when extracted in parallel.
+            fresh_names = {item.name for item in cefs_items}
+            filtered_recon = [c for c in recon_candidates if c.name not in fresh_names]
+            skipped_fresh = len(recon_candidates) - len(filtered_recon)
+            if skipped_fresh:
+                _LOGGER.info(
+                    "Skipping %d reconsolidation candidate(s) whose name already appears as a fresh item",
+                    skipped_fresh,
+                )
+
+            # Also deduplicate within reconsolidation candidates: if the same installable name
+            # appears in multiple old consolidated images (e.g. after multiple consolidation
+            # passes), keep the one from the most recently created consolidated image.
+            # Keeping duplicates causes a ValueError("Duplicate subdir name") when both are
+            # extracted in parallel. We prefer the newest image in case content ever diverged.
+            filtered_recon.sort(
+                key=lambda c: c.squashfs_path.stat().st_mtime if c.squashfs_path.exists() else 0,
+                reverse=True,  # newest first
+            )
+            seen_recon_names: set[str] = set()
+            deduped_recon = []
+            for candidate in filtered_recon:
+                if candidate.name in seen_recon_names:
+                    _LOGGER.info(
+                        "Skipping duplicate reconsolidation candidate '%s' (already included from a newer consolidated image)",
+                        candidate.name,
+                    )
+                else:
+                    seen_recon_names.add(candidate.name)
+                    deduped_recon.append(candidate)
+            skipped_dup = len(filtered_recon) - len(deduped_recon)
+            if skipped_dup:
+                _LOGGER.info(
+                    "Removed %d duplicate reconsolidation candidate(s) appearing in multiple consolidated images",
+                    skipped_dup,
+                )
+
+            cefs_items.extend(deduped_recon)
 
     if not cefs_items:
         _LOGGER.warning("No CEFS items found matching filter: %s", " ".join(filter_) if filter_ else "all")
@@ -692,14 +731,44 @@ def consolidate(
         raise click.ClickException(f"Failed to consolidate {failed_groups} groups")
 
 
+GC_DEFAULT_MIN_AGE = "2d"
+
+
+def _run_bak_cleanup(context: CliContext, state: CEFSState, min_age_seconds: float, force: bool) -> None:
+    """Find and remove stale .bak and .DELETE_ME_* items using manifest-known paths."""
+    current_time = time.time()
+    dry_run = context.installation_context.dry_run
+
+    _LOGGER.info("Checking %d manifest-known paths for .bak/.DELETE_ME_* items...", len(state.image_references))
+    candidates = find_bak_candidates(state.image_references, current_time)
+
+    if not candidates:
+        _LOGGER.info("No .bak or .DELETE_ME_* items found.")
+        return
+
+    _LOGGER.info("Found %d candidate items", len(candidates))
+
+    if not dry_run and not force:
+        eligible = sum(1 for item in candidates if item.age_seconds >= min_age_seconds)
+        if eligible > 0 and not click.confirm(f"Delete {eligible} .bak/.DELETE_ME_* items older than the min age?"):
+            _LOGGER.info("Backup cleanup cancelled by user.")
+            return
+
+    result = cleanup_bak_items(candidates, min_age_seconds, dry_run)
+    verb = "Would delete" if dry_run else "Deleted"
+    _LOGGER.info("%s %d items, skipped %d (too recent)", verb, result.deleted_count, result.skipped_too_recent)
+    if result.errors:
+        for err in result.errors:
+            _LOGGER.warning("Error during cleanup: %s", err)
+
+
 @cefs.command()
 @click.pass_obj
 @click.option("--force", is_flag=True, help="Skip confirmation prompt")
-@click.option(
-    "--min-age", default=DEFAULT_MIN_AGE, help="Minimum age of images to consider for deletion (e.g., 1h, 30m, 1d)"
-)
+@click.option("--min-age", default=GC_DEFAULT_MIN_AGE, help="Minimum age for deletion (e.g., 1h, 30m, 2d). Default: 2d")
 @click.option("--include-broken", is_flag=True, help="Include unreferenced broken images in garbage collection")
-def gc(context: CliContext, force: bool, min_age: str, include_broken: bool):
+@click.option("--cleanup-bak", is_flag=True, help="Also remove old .bak and .DELETE_ME_* items from NFS before GC")
+def gc(context: CliContext, force: bool, min_age: str, include_broken: bool, cleanup_bak: bool):
     """Garbage collect unreferenced CEFS images using manifests.
 
     Reads manifest files from CEFS images to determine expected symlink locations,
@@ -707,6 +776,9 @@ def gc(context: CliContext, force: bool, min_age: str, include_broken: bool):
     Images without valid references are marked for deletion.
 
     Images with .yaml.inprogress manifests are NEVER deleted (incomplete operations).
+
+    With --cleanup-bak, also removes .bak directories and .DELETE_ME_* items that
+    accumulate when CEFS replaces compiler directories with symlinks.
     """
     _LOGGER.info("Starting CEFS garbage collection using manifest system...")
 
@@ -728,6 +800,9 @@ def gc(context: CliContext, force: bool, min_age: str, include_broken: bool):
 
     _LOGGER.info("Scanning CEFS images directory and reading manifests...")
     state.scan_cefs_images_with_manifests()
+
+    if cleanup_bak:
+        _run_bak_cleanup(context, state, min_age_seconds, force)
 
     if include_broken:
         _LOGGER.info("Checking symlink references (--include-broken: will scan for actual usage of broken images)...")
@@ -784,6 +859,11 @@ def gc(context: CliContext, force: bool, min_age: str, include_broken: bool):
             raise click.ClickException(f"GC completed with {error_count} errors during analysis")
         return
 
+    installables_by_name = {
+        installable.name: installable for installable in context.get_installables([], bypass_enable_check=True)
+    }
+    destination_root = context.installation_context.destination
+
     _LOGGER.info("Unreferenced CEFS images to delete:")
     for image_path in unreferenced:
         try:
@@ -801,7 +881,7 @@ def gc(context: CliContext, force: bool, min_age: str, include_broken: bool):
         )
 
         # Show where each Installable in this image is currently installed
-        for line in get_installable_current_locations(image_path):
+        for line in get_installable_current_locations(image_path, installables_by_name, destination_root):
             _LOGGER.info(line)
 
     if context.installation_context.dry_run:

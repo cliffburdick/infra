@@ -40,6 +40,7 @@ apt-get -y install \
     cmake \
     ninja-build \
     elfutils \
+    bubblewrap \
     python-is-python3 \
     python3-pip \
     python3-venv \
@@ -57,5 +58,6 @@ apt-get -y install \
 if [ "$ARCH" == 'amd64' ]; then
     apt-get -y install \
         libc6-dev:i386 \
-        libc6-dev-i386
+        libc6-dev-i386 \
+        libstdc++6:i386
 fi

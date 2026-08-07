@@ -10,9 +10,12 @@ apt-get -y update
 apt-get -y install software-properties-common
 dpkg --add-architecture i386
 add-apt-repository ppa:deadsnakes/ppa
+# bubblewrap is not for the node itself: the GitHub runner boots this image,
+# and ce_install stages script-type installables inside bwrap under CEFS.
 apt-get install -y \
     binutils-multiarch \
     bison \
+    bubblewrap \
     bzip2 \
     cgroup-tools \
     curl \
@@ -35,6 +38,7 @@ apt-get install -y \
     libnl-route-3-dev \
     libpciaccess0 \
     libprotobuf-dev \
+    libstdc++6:i386 \
     libwww-perl \
     linux-libc-dev \
     make \
@@ -93,4 +97,4 @@ cp /infra/init/compiler-explorer.service /lib/systemd/system/compiler-explorer.s
 systemctl daemon-reload
 systemctl enable compiler-explorer
 
-adduser --system --group ce
+adduser --system --group --home /home/ce ce
